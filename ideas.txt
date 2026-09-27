@@ -1,0 +1,3 @@
+For Inference - > 
+
+1. Play aginst LLM - compare its performance against 5.5, Fable, Sonnet and other models accesible. 

@@ -1,0 +1,5 @@
+# sdist contents (setup.py passes absolute source paths, which setuptools does not add itself)
+include README.md setup.py pyproject.toml
+include pufferroyale/binding.c pufferroyale/env_binding.h pufferroyale/PUFFERLIB_LICENSE
+recursive-include pufferroyale/csrc *.h
+recursive-include pufferroyale/config *.ini

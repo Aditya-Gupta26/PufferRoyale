@@ -1,0 +1,89 @@
+Bootstrap: docker
+From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+# PufferRoyale training image (SPEC §15.6): CUDA 12.4 devel base (nvcc, so PufferLib's CUDA
+# advantage kernel is compiled), Python 3.12, PyTorch built for CUDA 12 (cu124 wheels),
+# PufferLib 3.0 from source (3.0 branch, commit 3b5c604) with NO_OCEAN=1 and the one-line
+# setup.py fix documented in docs/DECISIONS.md D6, and this package with its C extension.
+#
+# Build from the repository root (the %files paths are relative to it):
+#     apptainer build --fakeroot pufferroyale.sif hpc/pufferroyale.def
+# Run (GPU):
+#     apptainer exec --nv pufferroyale.sif python /opt/pufferroyale/scripts/train.py --help
+
+%labels
+    Name pufferroyale
+    Description Clash Royale 1v1 simulator (C) + PufferLib 3.0 training tools
+    Python 3.12
+    CUDA 12.4
+
+%files
+    pufferroyale /opt/pufferroyale/pufferroyale
+    scripts /opt/pufferroyale/scripts
+    tools /opt/pufferroyale/tools
+    data /opt/pufferroyale/data
+    setup.py /opt/pufferroyale/setup.py
+    pyproject.toml /opt/pufferroyale/pyproject.toml
+    MANIFEST.in /opt/pufferroyale/MANIFEST.in
+    README.md /opt/pufferroyale/README.md
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PATH=/opt/venv/bin:$PATH
+    export PYTHONNOUSERSITE=1
+    export PYTHONUNBUFFERED=1
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends software-properties-common ca-certificates curl git \
+        build-essential clang
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update
+    apt-get install -y --no-install-recommends python3.12 python3.12-venv python3.12-dev
+    rm -rf /var/lib/apt/lists/*
+
+    # Python 3.12 virtual environment
+    python3.12 -m venv /opt/venv
+    . /opt/venv/bin/activate
+    pip install --no-cache-dir --upgrade pip "setuptools>=64" wheel
+
+    # PyTorch for CUDA 12 first (PufferLib's torch extension is built against it)
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
+    pip install --no-cache-dir "numpy<2" scipy gymnasium psutil rich rich_argparse Cython
+
+    # PufferLib 3.0 from source with NO_OCEAN=1. Commit 3b5c604's setup.py only defines
+    # c_extension_paths inside `if not NO_OCEAN:`; the documented one-line fix (DECISIONS.md D6)
+    # defines it right after `c_extensions = []`.
+    git clone -b 3.0 https://github.com/PufferAI/PufferLib.git /opt/PufferLib
+    cd /opt/PufferLib
+    git checkout 3b5c604
+    grep -q '^c_extension_paths = \[\]' setup.py || \
+        sed -i 's/^c_extensions = \[\]$/c_extensions = []\nc_extension_paths = []/' setup.py
+    grep -q '^c_extension_paths = \[\]' setup.py
+    TORCH_CUDA_ARCH_LIST="7.0;8.0;8.6;9.0" NO_OCEAN=1 pip install --no-cache-dir --no-build-isolation .
+
+    # this package: the C extension (release build, in place) + an editable install
+    cd /opt/pufferroyale
+    rm -f pufferroyale/binding.cpython-*-darwin.so
+    rm -rf pufferroyale/__pycache__ scripts/__pycache__
+    python setup.py build_ext --inplace
+    pip install --no-cache-dir --no-build-isolation -e .
+    python -c "import pufferroyale, pufferroyale.royale, pufferroyale.league, pufferroyale.trainer, pufferroyale.metagame; print('pufferroyale OK')"
+
+%test
+    . /opt/venv/bin/activate
+    cd /opt/pufferroyale
+    python -c "import torch, pufferlib.pufferl, pufferroyale; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+    python scripts/league_train.py --help > /dev/null
+    python scripts/tournament.py --help > /dev/null
+
+%runscript
+    exec python "$@"
+
+%help
+    PufferRoyale training image. The project lives in /opt/pufferroyale (scripts/ there):
+        apptainer exec --nv --pwd /opt/pufferroyale pufferroyale.sif python scripts/league_train.py --help
+    See hpc/README.md for the NYU Torch SLURM templates.

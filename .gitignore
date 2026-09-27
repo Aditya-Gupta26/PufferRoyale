@@ -1,0 +1,25 @@
+# Python / build
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.so
+*.o
+*.a
+*.dSYM/
+.pytest_cache/
+# local third-party downloads (raylib etc.)
+third_party/
+# training artifacts
+experiments/
+checkpoints/
+wandb/
+logs/
+# never commit decoded client files or APKs
+data/raw/
+*.apk
+# OS
+.DS_Store
+resources
