@@ -53,6 +53,9 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     # PyTorch for CUDA 12 first (PufferLib's torch extension is built against it)
     pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
     pip install --no-cache-dir "numpy<2" scipy gymnasium psutil rich rich_argparse Cython
+    # tests, scripts/plot_history.py and --wandb logging (SPEC §19.7.11); "numpy<2" again so that the
+    # resolver picks a matplotlib / contourpy that keeps numpy 1.x (the newest contourpy needs numpy 2)
+    pip install --no-cache-dir "numpy<2" pytest matplotlib wandb
 
     # PufferLib 3.0 from source with NO_OCEAN=1. Commit 3b5c604's setup.py only defines
     # c_extension_paths inside `if not NO_OCEAN:`; the documented one-line fix (DECISIONS.md D6)

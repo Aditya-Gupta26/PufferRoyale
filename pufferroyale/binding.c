@@ -10,6 +10,7 @@
 #define PY_SSIZE_T_CLEAN
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <Python.h>
+#include <math.h>
 
 #include "csrc/royale.h"
 
@@ -48,6 +49,9 @@ static PyObject *py_env_ansi(PyObject *self, PyObject *args);
 static PyObject *py_env_info(PyObject *self, PyObject *args);
 static PyObject *py_royale_layout(PyObject *self, PyObject *args);
 static PyObject *py_env_log_peek(PyObject *self, PyObject *args); /* Phase D */
+static PyObject *py_env_set_row_grid(PyObject *self, PyObject *args); /* Phase G */
+static PyObject *py_env_deck_counts(PyObject *self, PyObject *args);
+static PyObject *py_game_coarse_to_fine(PyObject *self, PyObject *args);
 
 #define MY_METHODS \
     {"game_new", py_game_new, METH_VARARGS, "game_new(deck0, deck1, seed, lockout_ticks, tiebreak[, alternate, tower_troop0, tower_troop1]) -> capsule"}, \
@@ -81,7 +85,10 @@ static PyObject *py_env_log_peek(PyObject *self, PyObject *args); /* Phase D */
     {"env_ansi", py_env_ansi, METH_VARARGS, "env_ansi(env) -> str"}, \
     {"env_info", py_env_info, METH_VARARGS, "env_info(env) -> dict"}, \
     {"royale_layout", py_royale_layout, METH_NOARGS, "royale_layout() -> dict"}, \
-    {"env_log_peek", py_env_log_peek, METH_VARARGS, "env_log_peek(env) -> dict of raw Log sums (not cleared)"}
+    {"env_log_peek", py_env_log_peek, METH_VARARGS, "env_log_peek(env) -> dict of raw Log sums (not cleared)"}, \
+    {"env_set_row_grid", py_env_set_row_grid, METH_VARARGS, "env_set_row_grid(env, row, grid)"}, \
+    {"env_deck_counts", py_env_deck_counts, METH_VARARGS, "env_deck_counts(env) -> (pool counts, random, rejected)"}, \
+    {"game_coarse_to_fine", py_game_coarse_to_fine, METH_VARARGS, "game_coarse_to_fine(g, team, action, grid) -> fine action (0 = no-op / illegal)"}
 
 /* The vendored PufferLib header is not ours to edit; silence its -Wextra noise only (clang and
  * gcc spell the pragmas differently; each block is guarded so neither warns about the other's). */
@@ -120,10 +127,8 @@ static double kw_num(PyObject *kwargs, const char *key, double dflt) {
     return dflt;
 }
 
-/* A deck keyword: None -> random per reset (returns 1), or 8 distinct card ids. */
-static int kw_deck(PyObject *kwargs, const char *key, int8_t out[8]) {
-    PyObject *v = PyDict_GetItemString(kwargs, key);
-    if (!v || v == Py_None) return 1;
+/* 8 distinct card ids from a Python sequence (ValueError / TypeError otherwise). */
+static int deck8_from(PyObject *v, int8_t out[8]) {
     PyObject *seq = PySequence_Fast(v, "deck must be None or 8 card ids");
     if (!seq) return -1;
     if (PySequence_Fast_GET_SIZE(seq) != 8) {
@@ -150,6 +155,130 @@ static int kw_deck(PyObject *kwargs, const char *key, int8_t out[8]) {
     return 0;
 }
 
+/* A deck keyword: None -> random per reset (returns 1), or 8 distinct card ids. */
+static int kw_deck(PyObject *kwargs, const char *key, int8_t out[8]) {
+    PyObject *v = PyDict_GetItemString(kwargs, key);
+    if (!v || v == Py_None) return 1;
+    return deck8_from(v, out);
+}
+
+/* A list of decks (deck-sampler keywords, SPEC §19.5): each 8 distinct ids, kept in the given
+ * order (the order a pool deck is installed in, ruling v0.5-G.1). Returns the count, or -1 with an
+ * exception set. */
+static int kw_deck_list(PyObject *kwargs, const char *key, int8_t (*out)[8], int cap) {
+    PyObject *v = PyDict_GetItemString(kwargs, key);
+    if (!v || v == Py_None) return 0;
+    PyObject *seq = PySequence_Fast(v, "a deck list must be a sequence of 8-card decks");
+    if (!seq) return -1;
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    if (n > cap) {
+        Py_DECREF(seq);
+        PyErr_Format(PyExc_ValueError, "%s: at most %d decks (got %zd)", key, cap, n);
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (deck8_from(PySequence_Fast_GET_ITEM(seq, i), out[i]) < 0) {
+            Py_DECREF(seq);
+            return -1;
+        }
+    }
+    Py_DECREF(seq);
+    return (int)n;
+}
+
+/* SPEC §19.1: reward v2 keywords (validated; the Python wrapper checks them first). */
+static int init_rewards(Env *env, PyObject *kwargs) {
+    env->w_tower = kw_num(kwargs, "reward_tower", 0.0);
+    env->w_crown = kw_num(kwargs, "reward_crown", 0.0);
+    env->w_elixir = kw_num(kwargs, "reward_elixir", 0.0);
+    env->w_play = kw_num(kwargs, "reward_play", 0.0);
+    env->cap_elixir = kw_num(kwargs, "reward_elixir_cap", 20.0);
+    env->cap_play = kw_num(kwargs, "reward_play_cap", 20.0);
+    env->reward_gamma = kw_num(kwargs, "reward_gamma", 1.0);
+    env->anneal_steps = kw_num(kwargs, "shaping_anneal_steps", 0.0);
+    env->step_offset = kw_num(kwargs, "shaping_step_offset", 0.0);
+    if (PyErr_Occurred()) return -1;
+    double w[4] = {env->w_tower, env->w_crown, env->w_elixir, env->w_play};
+    for (int i = 0; i < 4; i++)
+        if (!(w[i] >= 0.0 && w[i] < HUGE_VAL)) {
+            PyErr_SetString(PyExc_ValueError, "reward weights must be finite and >= 0 (SPEC §19.1)");
+            return -1;
+        }
+    if (!(env->cap_elixir > 0.0) || !(env->cap_play > 0.0)) {
+        PyErr_SetString(PyExc_ValueError, "reward_elixir_cap and reward_play_cap must be > 0 (SPEC §19.1)");
+        return -1;
+    }
+    if (!(env->reward_gamma > 0.0 && env->reward_gamma <= 1.0)) {
+        PyErr_SetString(PyExc_ValueError, "reward_gamma must lie in (0, 1] (SPEC §19.1)");
+        return -1;
+    }
+    if (!(env->anneal_steps >= 0.0 && env->anneal_steps < HUGE_VAL) || !(env->step_offset >= 0.0 && env->step_offset < HUGE_VAL)) {
+        PyErr_SetString(PyExc_ValueError, "shaping_anneal_steps and shaping_step_offset must be finite and >= 0 (SPEC §19.1)");
+        return -1;
+    }
+    env->shaping = env->w_tower != 0.0 || env->w_crown != 0.0 || env->w_elixir != 0.0 || env->w_play != 0.0;
+    return 0;
+}
+
+/* SPEC §19.5: the deck-sampler keywords (Python parses deck-set strings into id lists). */
+static int init_decks(RoyaleDecks *d, PyObject *kwargs) {
+    double frac = kw_num(kwargs, "random_deck_frac", 0.0);
+    int draw = (int)kw_num(kwargs, "deck_draw", 0);
+    if (PyErr_Occurred()) return -1;
+    d->n_pool = kw_deck_list(kwargs, "deck_pool", d->pool, PR_DECK_POOL_MAX);
+    if (d->n_pool < 0) return -1;
+    int8_t held[PR_DECK_HELDOUT_MAX][8];
+    d->n_heldout = kw_deck_list(kwargs, "heldout_decks", held, PR_DECK_HELDOUT_MAX);
+    if (d->n_heldout < 0) return -1;
+    for (int i = 0; i < d->n_heldout; i++) d->heldout[i] = royale_deck_mask(held[i]);
+    if (!(frac >= 0.0 && frac <= 1.0)) {
+        PyErr_SetString(PyExc_ValueError, "random_deck_frac must lie in [0, 1] (SPEC §19.5)");
+        return -1;
+    }
+    if (frac < 1.0 && d->n_pool == 0 && frac > 0.0) {
+        PyErr_SetString(PyExc_ValueError, "random_deck_frac < 1 needs a non-empty deck_pool (SPEC §19.5)");
+        return -1;
+    }
+    if (draw != 0 && draw != 1) {
+        PyErr_SetString(PyExc_ValueError, "deck_draw must be 0 (independent) or 1 (mirror)");
+        return -1;
+    }
+    for (int i = 0; i < d->n_pool; i++)
+        if (royale_is_heldout(d, royale_deck_mask(d->pool[i]))) {
+            PyErr_SetString(PyExc_ValueError, "a deck_pool deck is also a held-out deck (SPEC §19.5)");
+            return -1;
+        }
+    /* weights -> cumulative thresholds out of 2^32 (doubles at construction only) */
+    PyObject *wv = PyDict_GetItemString(kwargs, "deck_weights");
+    PyObject *ws = wv && wv != Py_None ? PySequence_Fast(wv, "deck_weights must be a sequence") : NULL;
+    if (wv && wv != Py_None && !ws) return -1;
+    if (ws && PySequence_Fast_GET_SIZE(ws) != d->n_pool) {
+        Py_DECREF(ws);
+        PyErr_SetString(PyExc_ValueError, "deck_weights must have one weight per deck_pool deck");
+        return -1;
+    }
+    double w[PR_DECK_POOL_MAX], total = 0.0;
+    for (int i = 0; i < d->n_pool; i++) {
+        w[i] = ws ? PyFloat_AsDouble(PySequence_Fast_GET_ITEM(ws, i)) : 1.0;
+        if (PyErr_Occurred() || !(w[i] > 0.0 && w[i] < HUGE_VAL)) {
+            Py_XDECREF(ws);
+            if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "deck weights must be finite and > 0");
+            return -1;
+        }
+        total += w[i];
+    }
+    Py_XDECREF(ws);
+    double acc = 0.0;
+    for (int i = 0; i < d->n_pool; i++) {
+        acc += w[i];
+        d->pool_cum[i] = i == d->n_pool - 1 ? (uint64_t)1 << 32 : (uint64_t)(acc / total * 4294967296.0);
+    }
+    d->random_thr = (uint64_t)(frac * 4294967296.0 + 0.5);
+    d->mirror = draw;
+    d->active = d->n_pool > 0 || frac > 0.0;
+    return 0;
+}
+
 static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     (void)args;
     env->num_agents = (int)kw_num(kwargs, "num_agents", 2);
@@ -158,14 +287,19 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->learner_cfg = (int)kw_num(kwargs, "learner_side", -1);
     int lockout = (int)kw_num(kwargs, "deploy_lockout_ticks", PR_DEFAULT_LOCKOUT);
     int tiebreak = (int)kw_num(kwargs, "tiebreak", PR_TIEBREAK_ABSOLUTE);
-    env->reward_tower = (float)kw_num(kwargs, "reward_tower", 0.0);
-    env->reward_crown = (float)kw_num(kwargs, "reward_crown", 0.0);
     double prob = kw_num(kwargs, "bot_play_prob", 0.2);
     env->mask_check = (int)kw_num(kwargs, "mask_check", 0);
     env->render_mode = (int)kw_num(kwargs, "render_mode", PR_RENDER_NONE);
     long long seed = (long long)kw_num(kwargs, "seed", 0);
     int tt0 = (int)kw_num(kwargs, "tower_troop0", 0), tt1 = (int)kw_num(kwargs, "tower_troop1", 0);
+    int grid = (int)kw_num(kwargs, "placement_grid", 1);
     if (PyErr_Occurred()) return -1;
+    if (init_rewards(env, kwargs) < 0 || init_decks(&env->decks, kwargs) < 0) return -1;
+    if (!royale_grid_ok(grid)) {
+        PyErr_SetString(PyExc_ValueError, "placement_grid must be 1, 2 or 4 (SPEC §19.4)");
+        return -1;
+    }
+    env->grid = env->row_grid[0] = env->row_grid[1] = grid;
     if (tt0 < 0 || tt0 >= PR_N_TOWER_TROOPS || tt1 < 0 || tt1 >= PR_N_TOWER_TROOPS) {
         PyErr_SetString(PyExc_ValueError, "tower_troop0/1 must be a tower-troop index 0..3 (SPEC §16.3)");
         return -1;
@@ -189,6 +323,11 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     if (prob < 0.0) prob = 0.0;
     if (prob > 1.0) prob = 1.0;
     env->bot_ppm = (uint32_t)(prob * 1000000.0 + 0.5);
+    if (env->decks.active) { /* SPEC §19.5: the sampler deals from construction on; deck0/1 are ignored */
+        pr_rng_seed(&env->decks.rng, (uint64_t)seed, PR_DECK_STREAM);
+        royale_draw_pair(&env->decks, d0, d1);
+        r0 = r1 = 0;
+    }
     pr_setup_ex(&env->game, r0 ? NULL : d0, r1 ? NULL : d1, (uint64_t)seed, lockout,
                 tiebreak ? PR_TIEBREAK_FRACTION : PR_TIEBREAK_ABSOLUTE, tt0, tt1);
     env->game.st.alternate_first = (uint8_t)(kw_num(kwargs, "alternate_first", 0) != 0);
@@ -1173,6 +1312,21 @@ static PyObject *py_env_info(PyObject *self, PyObject *args) {
     PyList_SET_ITEM(decks, 0, i8_list(env->game.st.deck[0], 8));
     PyList_SET_ITEM(decks, 1, i8_list(env->game.st.deck[1], 8));
     dset(d, "decks", decks);
+    /* SPEC §19.5: with the deck sampler active, deck0 / deck1 are ignored */
+    DSET_BOOL(d, "deck_sampler", env->decks.active);
+    DSET_BOOL(d, "deck0_ignored", env->decks.active);
+    DSET_BOOL(d, "deck1_ignored", env->decks.active);
+    DSET_BOOL(d, "deck_mirror", env->decks.mirror);
+    DSET_INT(d, "placement_grid", env->grid);
+    /* SPEC §19.9.2: one entry per team; a scripted-bot team (single-agent env) always plays fine */
+    int team_grid[2] = {env->row_grid[0], env->row_grid[1]};
+    if (env->num_agents == 1) {
+        team_grid[env->learner] = env->row_grid[0];
+        team_grid[1 - env->learner] = 1;
+    }
+    dset(d, "row_grids", Py_BuildValue("(ii)", team_grid[0], team_grid[1]));
+    DSET_INT(d, "env_steps", env->env_steps);       /* c_steps since creation (SPEC §19.1 n) */
+    dset(d, "shaping_multiplier", PyFloat_FromDouble(royale_anneal(env, env->env_steps))); /* m of the next step */
     if (PyErr_Occurred()) { Py_DECREF(d); return NULL; }
     return d;
 }
@@ -1250,4 +1404,63 @@ static PyObject *py_env_log_peek(PyObject *self, PyObject *args) {
         return NULL;
     }
     return d;
+}
+
+
+/* ================================================================== Phase G additions (SPEC §19) */
+
+/* env_set_row_grid(env_handle, row, grid): the placement grid row `row` of one native env decodes
+ * its actions with (SPEC §19.4). LeagueVecEnv sets a bot opponent's row to 1 (fine actions, as in
+ * v0.4) and the policy rows to the env's grid. */
+static PyObject *py_env_set_row_grid(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *handle;
+    int row, grid;
+    if (!PyArg_ParseTuple(args, "Oii", &handle, &row, &grid)) return NULL;
+    Env *env = (Env *)PyLong_AsVoidPtr(handle);
+    if (!env) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "invalid env handle");
+        return NULL;
+    }
+    if (row < 0 || row >= env->num_agents || !royale_grid_ok(grid)) {
+        PyErr_SetString(PyExc_ValueError, "row must be an agent row of the env and grid 1, 2 or 4");
+        return NULL;
+    }
+    env->row_grid[row] = grid;
+    Py_RETURN_NONE;
+}
+
+/* env_deck_counts(env_handle) -> ([pool deck counts], random, random_rejected) (SPEC §19.5). */
+static PyObject *py_env_deck_counts(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *handle;
+    if (!PyArg_ParseTuple(args, "O", &handle)) return NULL;
+    Env *env = (Env *)PyLong_AsVoidPtr(handle);
+    if (!env) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "invalid env handle");
+        return NULL;
+    }
+    const RoyaleDecks *d = &env->decks;
+    PyObject *pool = PyList_New(d->n_pool);
+    if (!pool) return NULL;
+    for (int i = 0; i < d->n_pool; i++) PyList_SET_ITEM(pool, i, PyLong_FromLongLong((long long)d->pool_count[i]));
+    return Py_BuildValue("(NLL)", pool, (long long)d->random_count, (long long)d->rejected_count);
+}
+
+/* game_coarse_to_fine(g, team, action, grid) -> the fine action (SPEC §19.4), 0 = no-op / illegal. */
+static PyObject *py_game_coarse_to_fine(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *cap;
+    int team, grid;
+    long long action;
+    if (!PyArg_ParseTuple(args, "OiLi", &cap, &team, &action, &grid)) return NULL;
+    PrGame *g = get_game(cap);
+    if (!g) return NULL;
+    if (team < 0 || team > 1 || !royale_grid_ok(grid)) {
+        PyErr_SetString(PyExc_ValueError, "team must be 0 or 1 and grid 1, 2 or 4");
+        return NULL;
+    }
+    if (action < 0 || action >= ROYALE_GRID_ACTIONS(grid)) return PyLong_FromLong(0);
+    int fine = royale_coarse_to_fine(&g->st, team, (int)action, grid);
+    return PyLong_FromLong(fine < 0 ? 0 : fine);
 }

@@ -90,7 +90,7 @@ def test_opponent_rows_never_enter_the_ppo_buffer():
     pool = L.OpponentPool(anchors=("bot:heuristic",), self_play_frac=0.0, anchor_frac=1.0, seed=0)
     lv = L.LeagueVecEnv(pool, num_envs=4, seed=0, frame_skip=50, log_interval=10 ** 9)
     torch.manual_seed(0)
-    policy = Policy(lv.driver_env)
+    policy = Policy(lv.driver_env, head="flat")             # v0.4 head: one bias per joint action
     with torch.no_grad():
         policy.actor.bias[0] += 200.0                       # always the no-op
     lv.set_policy(policy)
@@ -257,11 +257,18 @@ def test_load_policy_infers_non_default_sizes(tmp_path):
     L = league()
     p = make_ckpt(tmp_path / "small.pt", hidden_size=64, cnn_channels=16, entity_hidden=32, scalar_hidden=16)
     pol, rec = L.load_policy(p)
-    assert not rec and pol.hidden_size == 64 and pol.actor.in_features == 64
+    assert not rec and pol.hidden_size == 64 and pol.value.in_features == 64 and pol.head == "conditional"
+    assert pol.cnn[0].out_channels == 16 and pol.entity[0].out_features == 32 and pol.scalars[0].out_features == 16
     assert not any(t.requires_grad for t in pol.parameters())
     rp = make_ckpt(tmp_path / "rsmall.pt", recurrent=True, hidden_size=64, cnn_channels=16)
     rpol, rrec = L.load_policy(rp)
     assert rrec and rpol.hidden_size == 64
+    # SPEC §19.6: head, card stats, position channels and the grid are inferred too
+    fp = make_ckpt(tmp_path / "flat.pt", head="flat", card_stats=0, hidden_size=64)
+    fpol, _ = L.load_policy(fp)
+    assert fpol.head == "flat" and not fpol.card_stats and fpol.actor.in_features == 64
+    cp = make_ckpt(tmp_path / "cond.pt", pos_channels=8, hidden_size=64)
+    assert L.load_policy(cp)[0].pos_channels == 8
 
 
 def test_sampled_opponent_actions_are_legal():
@@ -277,7 +284,9 @@ def test_sampled_opponent_actions_are_legal():
     for _ in range(50):
         a = L.select_actions(ml, False, g)
         assert all(obs[r, R.MASK_OFFSET + a[r]] == 1.0 for r in range(4))
-    assert np.array_equal(L.select_actions(ml, True, g), ml.argmax(-1).numpy())
+    greedy = L.select_actions(ml, True, g)                      # the card-first rule (SPEC §19.11)
+    assert np.array_equal(greedy, L.greedy_actions(ml))
+    assert all(obs[r, R.MASK_OFFSET + greedy[r]] == 1.0 for r in range(4))
 
 
 # ------------------------------------------------------------------------------------ MMD on recurrent batches

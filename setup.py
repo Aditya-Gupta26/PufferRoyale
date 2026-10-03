@@ -4,6 +4,7 @@
     DEBUG=1 python setup.py build_ext --inplace --force   # -O0 -g + ASan/UBSan
     uv pip install -e .            (or pip install -e .)       engine + env API
     uv pip install -e '.[train]'   (or pip install -e '.[train]') + torch / PufferLib for training
+    uv pip install -e '.[plots]'   (or pip install -e '.[plots]') + matplotlib for scripts/plot_history.py
 
 The engine is header-only C99 under pufferroyale/csrc/; the only translation unit is
 pufferroyale/binding.c, compiled against the vendored pufferroyale/env_binding.h.
@@ -85,6 +86,7 @@ setup(
     python_requires=">=3.10",
     install_requires=["numpy", "gymnasium"],
     # PufferLib 3.0 comes from source (NO_OCEAN=1, see README); torch is PuffeRL's backend
-    extras_require={"train": ["torch", "pufferlib>=3.0,<3.1"]},
+    # plots: scripts/plot_history.py (SPEC §19.7.10)
+    extras_require={"train": ["torch", "pufferlib>=3.0,<3.1"], "plots": ["matplotlib"]},
     zip_safe=False,
 )

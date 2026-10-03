@@ -6,8 +6,9 @@ calibration ledger (`data/source/royalesim-calibration.json`, cited as `section.
 (3) known divergences from the real game. It tracks **SPEC v0.4.2** (engine state version 4:
 Phase E -- the 43 cards of SPEC §16, ids 21-63, the three non-default tower troops and the v0.3
 observation -- plus the second audit's engine amendments of SPEC §18). Sections 1-11 describe the
-engine as a whole; §12 lists every Phase E choice card by card; §13 the §18 amendments. All choices
-are deterministic.
+engine as a whole; §12 lists every Phase E choice card by card; §13 the §18 amendments; §14 the
+env / observation choices of the SPEC §19 (v0.5-G) work package (the engine is unchanged by it). All
+choices are deterministic.
 
 Legend: **[IMPL]** = an implementation choice where the SPEC allows one (the Phase-A choices
 were approved by the orchestrator); **[PIN]** = behaviour fixed by a SPEC v0.2 §13
@@ -500,9 +501,9 @@ divergence versus RoyaleSim or the live game.
 
 ## 9. Environment and observation (SPEC §9)
 
-- **Layout, v0.3 [PIN §16.4, §16.6.16-17, §16.6.22]** (constants exported by
-  `pufferroyale.royale`, read from the binding): `OBS_SIZE = 17707` = spatial 25x32x18 (14400)
-  + entities 64x11 (704) + scalars 298 + mask 2305. `CARD_SLOTS = 128`; card identities are the
+- **Layout, v0.5 [PIN §16.4, §16.6.16-17, §16.6.22, §19.3]** (constants exported by
+  `pufferroyale.royale`, read from the binding): `OBS_SIZE = 17715` = spatial 25x32x18 (14400)
+  + entities 64x11 (704) + scalars 306 + mask 2305. `CARD_SLOTS = 128`; card identities are the
   float integer `card_id + 1` (0 = empty) in entity feature 0, the hand (4), the next card (1)
   and the opponent's last four (4); the 128-wide multi-hots (opponent cards seen, deduced hand)
   are indexed by `card_id` (slots 64-127 always 0). Entity rows: card id + 1 [0], x/18000 [1],
@@ -513,7 +514,7 @@ divergence versus RoyaleSim or the live game.
   affordable 4, tick 1, overtime 1, elixir_rate 1, lockout 1, own_towers 3, enemy_towers 3,
   king_active 2, crowns 2, opp_seen 128, opp_spent 1, opp_last4 4, opp_deduced_hand 128,
   opp_elixir_ub 1, own_tower_troop 4, enemy_tower_troop 4 (index order princess, cannoneer,
-  dagger_duchess, royal_chef; the opponent's tower troop is public). Spawned, death-spawned and
+  dagger_duchess, royal_chef; the opponent's tower troop is public), own_deck 8 (§14.1). Spawned, death-spawned and
   released units carry the card that created them (Witch Skeletons -> Witch, Golemites ->
   Golem, Barbarian Barrel's Barbarian -> Barbarian Barrel, ...), in the observation and in
   `entities()['card_id']` [PIN §16.6.6]. Checkpoints trained on v0.2 observations do not load.
@@ -546,10 +547,10 @@ divergence versus RoyaleSim or the live game.
   `Royale(mask_check=True)` re-validates all 2305 actions with `pr_check_play` after every step
   and reports disagreements in the log key `mask_mismatch` (0 in every run; a corrupted entry is
   detected, `tests/c/test_env.c`).
-- **Rewards**: terminal +1/-1/0 plus optional shaping `reward_tower x (sum of enemy tower hp
-  fraction lost - own lost)` and `reward_crown x (own crowns gained - enemy's)`, computed once
-  per step for team 0 and negated for team 1, so self-play rewards are exactly antisymmetric.
-  PuffeRL clips rewards to [-1, 1].
+- **Rewards**: terminal +1/-1/0 plus the optional potential-based shaping of SPEC §19.1 (reward v2,
+  §14.2 below; it replaced the v0.4 tower / crown difference shaping), computed once per step for
+  team 0 and negated for team 1, so self-play rewards are exactly antisymmetric. PuffeRL clips rewards
+  to [-1, 1] (MMDPuffeRL's `reward_clip`, SPEC §19.2, can lift that).
 - **Terminals / reset**: terminals = 1 for every row of the env on the ending step; the env
   re-deals inside the same step (the returned observation is the new match's; random decks and
   `learner_side='random'` are re-drawn); truncations are never set. `reset(seed=s)` reseeds env
@@ -837,3 +838,93 @@ unchanged (version 4). Regression tests: `tests/c/test_audit2.c`, `tests/c/test_
 audit (`mirror.c`) reports 0 divergences: 300 matches forced to each tower troop, and 1000 random
 ones.
 
+
+## 14. Training work package, env side (SPEC §19, v0.5-G)
+
+Everything here lives in `royale.h` (env), `pr_obs.h` (encoder), `binding.c`, `royale.py`, `decks.py`
+and `league.py`; `pr_*.h` game logic is untouched (golden hashes unchanged). With every new keyword at
+its default `Royale` is bit-identical to v0.4 apart from the `own_deck` field: checked against
+fingerprints (observations without `own_deck`, rewards, terminals, logs) recorded from the v0.4 build
+(`tests/builder/test_wp_env.py::test_defaults_are_bit_identical_to_v04`).
+
+### 14.1 Own deck (SPEC §19.3)
+- **[PIN]** `own_deck` = the viewer's 8 deck cards `card_id + 1`, ascending by card id, at scalar
+  offset 298 (after `enemy_tower_troop`); `CARD_ID_SCALARS` gains it. Source: the engine's
+  `deck[team]` (the dealt deck, also for `random` and sampled decks), sorted in the encoder, so the
+  hand / queue order never shows.
+
+### 14.2 Reward v2 (SPEC §19.1)
+- **[PIN]** `F = gamma * Phi_new - Phi_prev`, `Phi_new = m_n * Phi_hat(s')` (0 on the ending step),
+  `Phi_prev` stored per match (set to 0 at every deal: construction, `reset`, auto-reset), all in
+  double; `r_0` is cast to float once.
+- **[IMPL]** `r_1 = 0.0f - r_0`: the exact negation for every non-zero reward, and +0 (never -0) for a
+  zero reward, which is what v0.4 stored; this keeps all-zero-weight rewards bit-identical.
+- **[IMPL]** `T_k` sums the three `pr_obs_tower_frac` float32 values converted to double; `L_k` is
+  `leaked[k] / 2800` in double per team, then differenced; the clips are applied to the differences.
+- **[IMPL]** The anneal counter `n` is a per-C-env int64 incremented by every `c_step` (never by a
+  reset), exposed as `env_info()["env_steps"]`; `env_info()["shaping_multiplier"]` is `m` of the next
+  step. `N` and `n0` are accepted as any finite real >= 0 (integers in practice).
+- **[IMPL] Validation** (Python first, the C init repeats it): weights must be finite and >= 0
+  (NaN / inf rejected too); caps > 0 (+inf allowed = no clip); `gamma` in (0, 1]; `N`, `n0` finite
+  and >= 0. With all four weights 0 the potential is not evaluated (Phi = 0 exactly).
+
+### 14.3 Placement grid (SPEC §19.4)
+- **[PIN]** Decoding exactly as the SPEC: block tiles, nearest legal tile to the block centre in
+  doubled integer coordinates, ties smaller ty then smaller tx; no legal tile = an illegal no-op
+  counted in `illegal_actions`; an out-of-range or negative action likewise.
+- **[IMPL] Exactness:** the tile-independent refusals (game over, slot, pending, lockout, elixir) come
+  from `pr_check_play` on the block's corner tile; the per-tile test is `pr_card_tile_legal_ctx` on one
+  `PrLegalCtx`, the same functions `pr_legal_mask` and `pr_check_play` use, so the candidate set is
+  exactly the fine mask (checked exhaustively on real states in `tests/c/test_wp_env.c` and
+  `tests/builder/test_wp_env.py`).
+- **[IMPL] Fine rows (the §19.4 mechanism):** every agent row of a C env has its own grid
+  (`row_grid`, default the env's `placement_grid`); grid 1 takes the v0.4 decode path. A 1-agent env's
+  scripted opponent always plays fine actions; `Royale.set_row_grid(env_index, row, grid)` changes a
+  row, and `LeagueVecEnv` sets, at every episode start, the learner row to the env grid and the
+  opponent row to 1 for `bot:` opponents (else the env grid). `env_info()["row_grids"]` reports them.
+- **[IMPL]** `Game.coarse_to_fine(team, a, 1)` returns `a` for a legal fine action and 0 for an illegal
+  one (the general rule with 1x1 blocks); the env's grid-1 rows queue the fine action directly, as v0.4.
+- **[PIN]** The observation's mask stays the fine 2305-mask; `royale.action_mask(obs, g)` derives the
+  coarse mask (`coarse[0] = 1`, block = any legal tile; partial blocks of g = 4 cover the existing tiles).
+
+### 14.4 Deck sampling (SPEC §19.5)
+- **[PIN]** Active iff `deck_pool` is non-empty or `random_deck_frac > 0`; then every deal (construction,
+  `reset`, auto-reset) draws team 0 then team 1 (mirror: team 1 copies team 0), random decks redrawn
+  while held out; draws use the env's own PCG32 stream (`PR_DECK_STREAM`), seeded like the bot / side
+  streams and reseeded by `reset(seed)`; the game stream is untouched (a one-deck pool plays bit for bit
+  like fixed decks given in ascending order).
+- **[IMPL] Draw procedure:** per seat one 32-bit draw `u` picks random (`u < round(frac * 2^32)`) or pool;
+  a pool deck takes one more 32-bit draw against cumulative weight thresholds `floor(cum_i / W * 2^32)`
+  (last = 2^32), so probabilities are exact to 2^-32 (a weight below 2^-32 of the total would never be
+  drawn); a random deck is a partial Fisher-Yates over the 64 cards (8 bounded draws per attempt). The
+  draw consumes `u` even when `frac` is 0 or 1. A mirror deal makes no draw for team 1.
+- **[IMPL] Construction:** the sampler stream is seeded from the env seed, the construction decks are
+  drawn, then every stream is reseeded (as v0.4 does for the game stream), so the first `reset()`
+  re-deals the construction decks; `deck_counts()` includes the construction deal.
+- **[PIN ruling v0.5-G.1] Installed card order** (the order the engine's shuffle starts from): a pool
+  deck named by a preset (`PRESET`, `PRESET:W`, a preset string in a list or a `file:` JSON, a
+  `{"deck": PRESET}` dict or a `(PRESET, w)` pair) keeps that preset's card order, so
+  `deck_pool="hog26"` deals exactly like `deck0 = deck1 = "hog26"` (same game-stream draws); every
+  other deck (card lists, `random:N:SEED`, random draws) is installed ascending.
+  `decks.deck_entries(spec)` returns `(deck, weight, installed order)`; `parse_deck_set` stays ascending.
+- **[IMPL]** Held-out decks are 64-bit card-set masks (linear scan). Capacities: exactly 256 pool decks
+  and 1024 held-out decks (more -> `ValueError`), stored inline in the env (no allocation).
+  `deck0` / `deck1` are still validated when the sampler is active, then ignored; `env_info()` reports
+  `deck_sampler`, `deck0_ignored`, `deck1_ignored` (all equal) and `deck_mirror`. With the sampler
+  inactive, `heldout_decks` has no effect (v0.4 `'random'` decks are not filtered).
+- **[IMPL] Deck-set strings:** whitespace around items and around `:` is ignored, empty items (e.g. a
+  trailing `;`) are skipped, `file:PATH` keeps inner spaces of the path; `random:N:SEED` needs N >= 1;
+  in a `file:` JSON list a string element is a preset name only, while a Python list element may be
+  any string item, a list of 8 cards, a `{"deck", "weight"}` dict or a `(deck, weight)` pair (so
+  `parse_deck_set` output parses to itself). `deck_key(deck)` = ascending ids joined by `-`.
+  `random_decks(n, seed)`: numpy PCG64 from `SeedSequence([sign, |seed|])`, `choice(64, 8, replace=False)`
+  sorted, repeats skipped (so a smaller `n` is a prefix).
+
+### 14.5 Per-card play rates (SPEC §19.7.6)
+- **[IMPL]** Counted in Python (`royale.CardStats`, vectorised numpy) from each decision's observation
+  (`hand`, `affordable`, `lockout`, the mask) and action, not in the C `Log`: `Royale` counts every
+  row, `LeagueVecEnv` the learner rows. "Allowed by the action mask" uses the coarse mask under a
+  grid > 1; out-of-range actions never count as played. The keys `cards/play_rate/<CARD_KEY>` (the
+  source key, e.g. `HogRider`) and `cards/decisions` are added to each emitted log; the counters carry
+  over a log interval in which no episode finished (nothing is emitted then) and reset after each
+  emission.

@@ -130,7 +130,7 @@ def test_all_scripts_use_the_fixed_trainer():
     for script in ("train.py", "league_train.py", "best_response.py"):
         src = open(os.path.join(SCRIPTS, script)).read()
         assert "pufferl.PuffeRL(" not in src and "PuffeRL if" not in src, f"{script} still builds the base class"
-    assert "MMDPuffeRL(tr, vecenv, policy)" in open(os.path.join(SCRIPTS, "train.py")).read()
+    assert "MMDPuffeRL(trainer_cfg, vecenv, policy, logger)" in open(os.path.join(SCRIPTS, "train.py")).read()
 
 
 # ------------------------------------------------------------------------------------ M3 non-finite learners
@@ -385,13 +385,15 @@ def test_results_are_bounded_and_drained():
 def test_recurrent_keeps_the_policy_init():
     env = pufferroyale.Royale(num_envs=1, num_agents=2)
     torch.manual_seed(0)
-    p = pufferroyale.torch.Policy(env)
-    before = {k: v.clone() for k, v in p.state_dict().items()}
-    r = pufferroyale.torch.Recurrent(env, p)
+    for head, finals in (("flat", ("actor",)), ("conditional", ("wait_logit", "slot_logit", "pos_out"))):
+        p = pufferroyale.torch.Policy(env, head=head)
+        before = {k: v.clone() for k, v in p.state_dict().items()}
+        r = pufferroyale.torch.Recurrent(env, p)
+        after = r.policy.state_dict()
+        assert all(torch.equal(before[k], after[k]) for k in before), "LSTMWrapper re-initialised the Policy"
+        for name in finals:
+            assert getattr(r.policy, name).weight.std() < 0.05, f"{name} keeps its std-0.01 init"
     env.close()
-    after = r.policy.state_dict()
-    assert all(torch.equal(before[k], after[k]) for k in before), "LSTMWrapper re-initialised the Policy"
-    assert r.policy.actor.weight.std() < 0.05, "actor keeps its std-0.01 init"
 
 
 def test_bot_play_prob_is_clamped_and_seeds_do_not_collide():

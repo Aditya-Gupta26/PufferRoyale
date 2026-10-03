@@ -227,6 +227,14 @@ class Game:
         slot, tx, ty = d
         return self.play_tile(team, slot, tx, ty)
 
+    def coarse_to_fine(self, team: int, action: int, grid: int) -> int:
+        """SPEC §19.4: the fine action (1 + slot*576 + ty*18 + tx) that action `action` of placement
+        grid `grid` (1, 2 or 4) plays for `team` right now -- the legal tile of its block nearest
+        the block centre (ties: smaller ty, then smaller tx) -- through the env's C mapping; 0 when
+        `action` is the no-op, out of range or has no legal tile. grid=1: the identity on legal
+        actions."""
+        return _b.game_coarse_to_fine(self._g, int(team), int(action), int(grid))
+
     def obs(self, team: int) -> np.ndarray:
         """The SPEC §9 observation of `team` for the current state (float32[OBS_SIZE])."""
         return _b.game_obs(self._g, int(team))

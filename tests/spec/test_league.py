@@ -346,8 +346,8 @@ def test_ckpt_opponent_loads_and_plays(pr, tmp_path):
     assert all(lg["illegal_actions"] == 0 for lg in logs)
 
 
-def _opponent_plays(tmp_path, greedy):
-    ck = L.make_ckpt(tmp_path / f"noopish_{greedy}.pt", noop_bias=6.0)
+def _opponent_plays(tmp_path, greedy, bias=6.0):
+    ck = L.make_ckpt(tmp_path / f"noopish_{greedy}_{bias}.pt", noop_bias=bias)
     pool = L.make_pool(anchors=(f"ckpt:{ck}",), self_play_frac=0.0, anchor_frac=1.0, seed=0)
     lv = L.make_league(pool, num_envs=2, seed=0, opponent_greedy=greedy, frame_skip=100, log_interval=1)
     recs = run(lv, 130)
@@ -358,11 +358,14 @@ def _opponent_plays(tmp_path, greedy):
 
 
 def test_opponent_greedy_vs_sampled(pr, tmp_path):
-    """A checkpoint whose no-op logit is raised by +6: greedy argmax (opponent_greedy=True) never
-    plays a card, while sampling (the default) still plays (P(no-op) is well below 1 with hundreds
-    of legal actions). The learner never plays, so every play is the opponent's."""
-    assert _opponent_plays(tmp_path, greedy=True) == 0, "opponent_greedy=True must take the argmax"
-    assert _opponent_plays(tmp_path, greedy=False) > 0, "default opponents sample (SPEC §15.7.6)"
+    """§15.7.6 as amended by §19.11.1 (greedy = card first, then tile). A checkpoint whose no-op logit is
+    raised by +20 makes P(wait) the largest marginal on every row (e^20 >> 4 x 576 legal tiles at
+    ~0), so the greedy opponent never plays; with +6, sampling (the default) still plays. The learner
+    never plays, so every play is the opponent's. (The card-first rule itself, incl. the +5 case where
+    a slot's total probability beats wait, is tested in test_v05_greedy.py.)"""
+    assert _opponent_plays(tmp_path, greedy=True, bias=20.0) == 0, \
+        "opponent_greedy=True with wait's marginal the largest must always wait (§19.11.1)"
+    assert _opponent_plays(tmp_path, greedy=False) > 0, "default opponents sample (SPEC §15.7.6, §19.11.2)"
 
 
 def test_learner_keys_rewritten_to_learner_seat(pr):

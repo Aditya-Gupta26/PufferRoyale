@@ -751,14 +751,15 @@ def _next_multiple(t, k):
 def play_llm_match(agent: LLMAgent, opponent, deck_agent, deck_opp, seed: int, agent_team: int = 0,
                    decision_interval: Optional[int] = None, max_ticks: int = MAX_TICKS, *,
                    opponent_interval: Optional[int] = None,
-                   greedy: bool = True, device: str = "cpu", tower_troop_agent: str = "princess",
+                   greedy: bool = False, device: str = "cpu", tower_troop_agent: str = "princess",
                    tower_troop_opp: str = "princess", skip_idle: bool = False) -> dict:
     """One match through Game (SPEC §17.1). `agent` plays `agent_team` with `deck_agent` and decides
     at every tick that is a multiple of `decision_interval` (default: agent.decision_interval, 20
     ticks = 1 s; SPEC §17.4.10). `opponent`: a bot spec ("bot:heuristic" ...; acts every
     `opponent_interval` ticks, default 10 = the env cadence), a checkpoint path / "ckpt:<path>" /
-    loaded policy (default cadence: the frame_skip it was trained with, else 10; greedy unless
-    greedy=False), or another LLMAgent (at its own decision_interval). Plays are queued for the
+    loaded policy (default cadence: the frame_skip it was trained with, else 10; seeded samples
+    from the masked policy, or the card-first greedy rule with greedy=True -- SPEC §19.11), or
+    another LLMAgent (at its own decision_interval). Plays are queued for the
     next tick.
     skip_idle=True skips the model call when the agent has no legal play at all (deploy lockout,
     nothing affordable) -- the only possible answer is then WAIT; counted as `skipped`.

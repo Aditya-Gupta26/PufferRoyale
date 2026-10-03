@@ -30,16 +30,19 @@ static TEnv *t_env(int num_agents, int opponent, int learner, uint64_t seed) {
 }
 
 static void test_layout(void) {
-    /* SPEC §16.4 (v0.3): 64 x 11 entity rows, integer card ids, 128-wide multi-hots, tower troops */
+    /* SPEC §16.4 (v0.3): 64 x 11 entity rows, integer card ids, 128-wide multi-hots, tower troops;
+     * SPEC §19.3 (v0.5): the own deck (8 ids) appended after the tower troops */
     CHECK_EQ(PR_OBS_C, 25);
     CHECK_EQ(PR_OBS_ENT_N, 64);
     CHECK_EQ(PR_OBS_ENT_F, 11);
     CHECK_EQ(PR_CARD_SLOTS, 128);
-    CHECK_EQ(PR_OBS_SCALAR_SIZE, 1 + 4 + 4 + 1 + 4 + 4 + 6 + 2 + 2 + 128 + 1 + 4 + 128 + 1 + 4 + 4);
-    CHECK_EQ(PR_OBS_SCALAR_SIZE, 298);
-    CHECK_EQ(PR_OBS_SIZE, 25 * 576 + 64 * 11 + 298 + 2305);
+    CHECK_EQ(PR_OBS_SCALAR_SIZE, 1 + 4 + 4 + 1 + 4 + 4 + 6 + 2 + 2 + 128 + 1 + 4 + 128 + 1 + 4 + 4 + 8);
+    CHECK_EQ(PR_OBS_SCALAR_SIZE, 306);
+    CHECK_EQ(PR_OBS_SIZE, 25 * 576 + 64 * 11 + 306 + 2305);
+    CHECK_EQ(PR_OBS_SIZE, 17715);
     CHECK_EQ(PR_SC_OWN_TT, PR_SC_OPP_ELIXIR_UB + 1);
     CHECK_EQ(PR_SC_ENEMY_TT, PR_SC_OWN_TT + 4);
+    CHECK_EQ(PR_SC_OWN_DECK, 298);
     int end = 0;
     for (int i = 0; i < PR_OBS_N_FIELDS; i++) { /* contiguous, in the SPEC §9.3 order */
         CHECK_EQ(PR_OBS_FIELDS[i].offset, end);

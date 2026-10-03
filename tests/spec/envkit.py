@@ -1,5 +1,6 @@
 """Shared helpers for the `pufferroyale.Royale` env tests (SPEC §9; v0.3 layout per §16.4 / §16.6:
-integer card ids card_id + 1, 128-wide multi-hots, (64, 11) entity rows, tower-troop one-hots)."""
+integer card ids card_id + 1, 128-wide multi-hots, (64, 11) entity rows, tower-troop one-hots;
+v0.5 §19.3: `own_deck` (8 ids) appended after `enemy_tower_troop`, SCALAR_SIZE 306)."""
 import numpy as np
 
 import helpers as H
@@ -7,16 +8,18 @@ import helpers as H
 CARD_SLOTS = 128
 TOWER_TROOPS = ["princess", "cannoneer", "dagger_duchess", "royal_chef"]      # §16.6 item 16 order
 
-# SPEC §9 item 3 order with the §16.4 encodings; §16.6 item 16 appends the tower-troop one-hots
+# SPEC §9 item 3 order with the §16.4 encodings; §16.6 item 16 appends the tower-troop one-hots;
+# SPEC §19.3 (v0.5) appends own_deck (8 ids card_id + 1, ascending) after enemy_tower_troop
 SCALAR_FIELDS = [
     ("own_elixir", 1), ("hand", 4), ("hand_costs", 4), ("next_card", 1), ("affordable", 4),
     ("tick", 1), ("is_overtime", 1), ("elixir_rate", 1), ("lockout", 1),
     ("own_tower_hp", 3), ("enemy_tower_hp", 3), ("king_active", 2), ("crowns", 2),
     ("opp_seen", CARD_SLOTS), ("opp_spent", 1), ("opp_last4", 4), ("opp_deduced", CARD_SLOTS),
-    ("opp_elixir_ub", 1), ("own_tower_troop", 4), ("enemy_tower_troop", 4),
+    ("opp_elixir_ub", 1), ("own_tower_troop", 4), ("enemy_tower_troop", 4), ("own_deck", 8),
 ]
-SCALAR_TOTAL = sum(n for _, n in SCALAR_FIELDS)          # 298
-EXACT_KEYS = ("own_tower_troop", "enemy_tower_troop")    # §16.6 item 16 pins these key names
+SCALAR_TOTAL = sum(n for _, n in SCALAR_FIELDS)          # 306 (v0.5 §19.3; 298 in v0.3/v0.4)
+# §16.6 item 16 pins the tower-troop key names; §19.3 pins SCALAR_INDEX["own_deck"] = (298, 8)
+EXACT_KEYS = ("own_tower_troop", "enemy_tower_troop", "own_deck")
 
 # SPEC §16.4 entity-row layout (F = 11); own slots 0-31, enemy slots 32-63
 E_ID, E_X, E_Y, E_HPF, E_HP2K, E_FLY, E_DEPLOY, E_STUN, E_SLOW, E_BUILDING, E_TOB = range(11)
@@ -80,7 +83,7 @@ def scalar_layout():
         off += n
     for k in EXACT_KEYS:
         assert k in m.SCALAR_INDEX and tuple(int(v) for v in m.SCALAR_INDEX[k]) == out[k], \
-            f"SCALAR_INDEX[{k!r}] must be {out[k]} (§16.6 item 16: appended after opp_elixir_ub)"
+            f"SCALAR_INDEX[{k!r}] must be {out[k]} (§16.6 item 16 / §19.3 appended fields)"
     return out
 
 

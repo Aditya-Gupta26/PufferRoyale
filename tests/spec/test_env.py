@@ -78,7 +78,7 @@ def test_layout_constants_consistent(pr):
     assert C >= 25, "10 per-side channels x 2 + 5 shared (SPEC §9.1)"
     n_ent, F = m.ENTITY_SHAPE
     assert n_ent == 64 and F == 11, "SPEC §16.4: 32 own + 32 enemy entity rows of exactly 11 floats"
-    assert m.SCALAR_SIZE >= 298, "SPEC §16.4 / §16.6: at least 298 scalar values"
+    assert m.SCALAR_SIZE == 306, "SPEC §16.4 / §16.6 + §19.3 (own_deck): exactly 306 scalar values"
     assert m.MASK_SIZE == H.N_ACTIONS
     sections = sorted([(m.SPATIAL_OFFSET, C * h * w), (m.ENTITY_OFFSET, n_ent * F),
                        (m.SCALAR_OFFSET, m.SCALAR_SIZE), (m.MASK_OFFSET, m.MASK_SIZE)])

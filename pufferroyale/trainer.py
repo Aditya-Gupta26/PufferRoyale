@@ -30,15 +30,37 @@ Fixes over the PufferLib 3.0 base class (SPEC §18.6 / §18.7):
   ZeroDivisionError in train().
 - load_training_state() restores optimizer state on resume and re-applies the configured
   learning rate / Adam betas / eps and the position on the cosine LR schedule.
+
+v0.5 additions (SPEC §19.2):
+- reward_clip (config, default 1.0): evaluate() is PuffeRL.evaluate() copied statement for
+  statement, except that the stored rewards are clamped to [-c, c] when c > 0 and stored unchanged
+  when c <= 0 (the base hard-codes [-1, 1]; potential-based shaped rewards can exceed it).
+- Entropy decomposition of the joint logits over 1 + 4 B actions (entropy_split): H_card over
+  {wait, slot 0..3} and H_pos = sum_s P(s) H(p(. | s)), with H_joint = H_card + H_pos. Every epoch
+  logs losses/entropy_card and losses/entropy_pos (minibatch means; computed without grad and
+  without RNG unless the split coefficients are set).
+- ent_coef_card / ent_coef_pos (config, default -1.0 = unset): both >= 0 replace
+  -ent_coef * mean(H_joint) by -(ent_coef_card * mean(H_card) + ent_coef_pos * mean(H_pos)); exactly
+  one set is a ValueError. Unset, train() is exactly the v0.4 / base computation.
+- obs_mask / masked_kl use the mask of the logits' placement grid (SPEC §19.4).
+- WandbLogger: PufferLib's WandbLogger interface for --wandb in train.py / league_train.py, working
+  with any wandb version (SPEC §19.7.5; PufferLib's own class needs wandb.util.generate_id).
+
+v0.5-G.3 (SPEC §19.10): shaping_anneal_steps (exact rational N = ceil(F T / R), fixed per run by the
+scripts), warn_shaping_clip (shaping weights > 0 with reward_clip > 0), and WandbLogger logs
+global_step as its step metric.
 """
 from __future__ import annotations
 
 import contextlib
 import copy
 import math
+import os
 import time
 from collections import defaultdict
+from fractions import Fraction
 
+import numpy as np
 import torch
 
 import pufferlib
@@ -61,11 +83,154 @@ def masked_kl(logits: torch.Tensor, ref_logits: torch.Tensor, mask: torch.Tensor
     return terms.sum(-1).mean()
 
 
-def obs_mask(observations: torch.Tensor) -> torch.Tensor:
-    """Legality mask (rows, 2305) in the row order of the policies' logits
-    (observations.reshape(-1, OBS_SIZE), also for the (segments, horizon, OBS) RNN batch)."""
+def obs_mask(observations: torch.Tensor, grid: int = 1) -> torch.Tensor:
+    """Legality mask (rows, 1 + 4 B) of placement grid `grid` (SPEC §19.4; 2305 wide for grid 1) in
+    the row order of the policies' logits (observations.reshape(-1, OBS_SIZE), also for the
+    (segments, horizon, OBS) RNN batch)."""
+    from .torch import action_mask
     x = observations.reshape(-1, R.OBS_SIZE)
-    return x[:, R.MASK_OFFSET:R.MASK_OFFSET + R.MASK_SIZE] > 0.5
+    return action_mask(x, grid)
+
+
+def entropy_split(logits: torch.Tensor):
+    """SPEC §19.2.2: per-row (H_card, H_pos) of p = softmax(logits) over A = 1 + 4 B joint actions
+    (slot-major, action 1 + s B + j): P(wait) = p_0, P(s) = sum_j p_{1 + s B + j},
+    H_card = -sum_{c in wait, 0..3} P(c) log P(c), H_pos = sum_s P(s) H(p(. | s)). A slot with
+    P(s) = 0 contributes 0 and 0 log 0 = 0, so H_card + H_pos = H_joint. Differentiable; finite
+    for masked logits (illegal = finfo.min), including rows where only wait is legal."""
+    A = logits.shape[-1]
+    if (A - 1) % 4:
+        raise ValueError(f"entropy_split needs 1 + 4 B joint logits, got {A}")
+    B = (A - 1) // 4
+    logp = torch.log_softmax(logits.float().reshape(-1, A), dim=-1)
+    lp_pos = logp[:, 1:].reshape(-1, 4, B)
+    lp_slot = torch.logsumexp(lp_pos, dim=-1)                               # log P(s), (N, 4)
+    lp_card = torch.cat([logp[:, :1], lp_slot], dim=-1)                     # (N, 5)
+    p_card = lp_card.exp()
+    h_card = -torch.where(p_card > 0, p_card * lp_card, torch.zeros_like(p_card)).sum(-1)
+    lp_cond = lp_pos - lp_slot.unsqueeze(-1)                                # log p(j | s)
+    p_cond = lp_cond.exp()
+    h_slot = -torch.where(p_cond > 0, p_cond * lp_cond, torch.zeros_like(p_cond)).sum(-1)    # H(p(. | s))
+    p_slot = p_card[:, 1:]
+    h_pos = torch.where(p_slot > 0, p_slot * h_slot, torch.zeros_like(p_slot)).sum(-1)
+    return h_card, h_pos
+
+
+def _coef(config, key):
+    """An entropy-split coefficient: None when unset (any negative value, default -1.0; SPEC
+    §19.9.11), else a finite float >= 0."""
+    v = config.get(key, -1.0)
+    if v is None:
+        return None
+    v = float(v)
+    if v < 0.0:
+        return None
+    if not math.isfinite(v):
+        raise ValueError(f"{key} must be finite, got {v!r}")
+    return v
+
+
+def shaping_anneal_steps(anneal_frac, total_timesteps, rows) -> int:
+    """SPEC §19.10.1: the anneal length N = ceil(F * total_timesteps / R) in exact rational arithmetic
+    on the decimal value of F (Fraction(str(F)): F = 0.07, T = 3e8, R = 3000 gives 7000, where the
+    float product gives 7001). 0 when F = 0 (constant weights)."""
+    try:
+        F = Fraction(str(anneal_frac).strip())
+    except (TypeError, ValueError, ZeroDivisionError):
+        raise ValueError(f"--shaping-anneal-frac must be a finite number >= 0, got {anneal_frac!r}") from None
+    rows = int(rows)
+    if F < 0:
+        raise ValueError(f"--shaping-anneal-frac must be a finite number >= 0, got {anneal_frac!r}")
+    if rows < 1:
+        raise ValueError("learner rows per step must be >= 1")
+    return int(math.ceil(F * int(total_timesteps) / rows))
+
+
+def shaping_env_kwargs(gamma, anneal_frac, total_timesteps, rows, global_step=0, anneal_steps=None) -> dict:
+    """SPEC §19.7.1 / §19.10.1: the reward-v2 env keywords a training script injects -- reward_gamma =
+    the trainer's gamma; shaping_anneal_steps = `anneal_steps` (the run's recorded N) when given, else
+    shaping_anneal_steps(F, total_timesteps, R) for --shaping-anneal-frac F (0 = constant weights) with
+    R learner rows per vector step; shaping_step_offset = global_step // R (the env steps a resumed run
+    has already done)."""
+    steps = shaping_anneal_steps(anneal_frac, total_timesteps, rows)      # validates F and R in any case
+    if anneal_steps is not None:
+        steps = int(anneal_steps)
+        if steps < 0:
+            raise ValueError(f"shaping_anneal_steps must be >= 0, got {anneal_steps!r}")
+    return {"reward_gamma": float(gamma), "shaping_anneal_steps": steps,
+            "shaping_step_offset": int(global_step) // int(rows)}
+
+
+#: the reward-v2 shaping weights of the env (SPEC §19.1)
+SHAPING_WEIGHTS = ("reward_tower", "reward_crown", "reward_elixir", "reward_play")
+
+
+def warn_shaping_clip(env_kwargs, reward_clip, prog="train") -> bool:
+    """SPEC §19.10.2: one warning on stderr when any shaping weight is > 0 while the trainer clamps
+    rewards (reward_clip > 0) -- the clamp may clip shaped terminal rewards. Not an error. Returns
+    whether it warned."""
+    import sys
+    clip = 1.0 if reward_clip is None else float(reward_clip)
+    on = [k for k in SHAPING_WEIGHTS if float((env_kwargs or {}).get(k) or 0.0) > 0.0]
+    if not (on and clip > 0.0):
+        return False
+    print(f"[{prog}] warning: reward shaping is on ({', '.join(on)}) while train.reward_clip = {clip:g} > 0: shaped "
+          f"rewards (terminal steps included) may be clipped; use --train.reward-clip 0", file=sys.stderr, flush=True)
+    return True
+
+
+class WandbLogger:
+    """Weights & Biases logger with the interface of PufferLib 3.0's pufferl.WandbLogger (run_id,
+    log(logs, step), upload_model(path), close(model_path, early_stop); `wandb` = the module) used
+    by train.py and league_train.py for --wandb (SPEC §19.7.5). PufferLib's own class calls
+    wandb.util.generate_id(), which recent wandb (e.g. 0.30) no longer has; here the run id is
+    wandb.init's own (or `load_id` when resuming a run), so it works across wandb versions. `args`
+    needs the keys wandb_project, wandb_group, tag and no_model_upload and is the run's wandb
+    config. wandb is imported here only, so a run without --wandb never imports it;
+    WANDB_MODE=offline needs no network (offline runs land in $WANDB_DIR/wandb/offline-run-*).
+    log(logs, step) records `step` as `global_step`, the declared step metric (SPEC §19.10.7), so the
+    epochs a resumed run re-does are kept."""
+
+    def __init__(self, args, load_id=None, resume="allow"):
+        import wandb
+        kw = dict(project=args.get("wandb_project"), group=args.get("wandb_group"), allow_val_change=True,
+                  save_code=False, resume=resume, config=dict(args),
+                  tags=[str(args["tag"])] if args.get("tag") is not None else [],
+                  settings=wandb.Settings(console="off"))            # no dashboard text sent to wandb
+        if load_id:
+            kw["id"] = str(load_id)
+        self.wandb = wandb
+        self.run = wandb.init(**kw)
+        self.run_id = self.run.id
+        self.should_upload_model = not args.get("no_model_upload")
+        # SPEC §19.10.7: global_step is the step metric of every series. Records carry it as a value and
+        # are logged without wandb's own `step`, which must increase: after a resume the re-done epochs
+        # (global steps already seen) would otherwise be dropped
+        self.run.define_metric("global_step")
+        self.run.define_metric("*", step_metric="global_step")
+
+    def log(self, logs, step):
+        rec = dict(logs)
+        rec["global_step"] = int(step)
+        self.run.log(rec)
+
+    def upload_model(self, model_path):
+        artifact = self.wandb.Artifact(self.run_id, type="model")
+        artifact.add_file(model_path)
+        self.run.log_artifact(artifact)
+
+    def close(self, model_path, early_stop):
+        self.run.summary["early_stop"] = bool(early_stop)
+        if self.should_upload_model and model_path and os.path.isfile(model_path):
+            self.upload_model(model_path)
+        self.run.finish()
+
+    def abort(self):
+        """Finish the run with a failure exit code (never raises: used on error paths)."""
+        try:
+            self.run.finish(exit_code=1)
+        except Exception:  # noqa: BLE001 -- never mask the original error
+            pass
 
 
 class _DaemonUtilization(pufferl.Utilization):
@@ -94,6 +259,16 @@ class MMDPuffeRL(pufferl.PuffeRL):
     """PuffeRL + mmd_coef * KL(pi_theta || pi_ref). Same constructor as PuffeRL."""
 
     def __init__(self, config, vecenv, policy, logger=None):
+        # SPEC §19.2: reward clip and entropy split, validated before the base class starts anything
+        clip = config.get("reward_clip", 1.0)
+        self.reward_clip = 1.0 if clip is None else float(clip)
+        if not math.isfinite(self.reward_clip):
+            raise ValueError(f"reward_clip must be finite, got {self.reward_clip!r}")
+        self.ent_coef_card, self.ent_coef_pos = _coef(config, "ent_coef_card"), _coef(config, "ent_coef_pos")
+        if (self.ent_coef_card is None) != (self.ent_coef_pos is None):
+            raise ValueError("ent_coef_card and ent_coef_pos must be set together (both >= 0) or both left unset "
+                             f"(negative): got {config.get('ent_coef_card', -1.0)!r} and {config.get('ent_coef_pos', -1.0)!r}")
+        self.entropy_split = self.ent_coef_card is not None
         orig = pufferl.Utilization
         pufferl.Utilization = _DaemonUtilization          # the base constructor starts the monitor
         try:
@@ -162,15 +337,127 @@ class MMDPuffeRL(pufferl.PuffeRL):
         with torch.no_grad():
             ref_state = dict(action=None, lstm_h=None, lstm_c=None)
             ref_logits, _ = self.ref_policy(mb_obs, ref_state)
-        return masked_kl(logits, ref_logits, obs_mask(mb_obs))
+        from .torch import grid_of_actions
+        return masked_kl(logits, ref_logits, obs_mask(mb_obs, grid_of_actions(logits.shape[-1])))
+
+    # ------------------------------------------------------------------ evaluate
+    # SPEC §19.2.1: PufferLib 3.0's PuffeRL.evaluate() (pufferl.py, 3.0 branch commit 3b5c604) copied
+    # statement for statement; the one change is the block marked "REWARD CLIP" (the base clamps
+    # every stored reward to [-1, 1]). With reward_clip = 1 the stored rewards, actions, RNG draws and
+    # buffers are exactly the base class's.
+    def evaluate(self):
+        profile = self.profile
+        epoch = self.epoch
+        profile('eval', epoch)
+        profile('eval_misc', epoch, nest=True)
+
+        config = self.config
+        device = config['device']
+
+        if config['use_rnn']:
+            for k in self.lstm_h:
+                self.lstm_h[k].zero_()
+                self.lstm_c[k].zero_()
+
+        self.full_rows = 0
+        while self.full_rows < self.segments:
+            profile('env', epoch)
+            o, r, d, t, info, env_id, mask = self.vecenv.recv()
+
+            profile('eval_misc', epoch)
+            env_id = slice(env_id[0], env_id[-1] + 1)
+
+            done_mask = d + t # TODO: Handle truncations separately
+            self.global_step += int(mask.sum())
+
+            profile('eval_copy', epoch)
+            o = torch.as_tensor(o)
+            o_device = o.to(device)#, non_blocking=True)
+            r = torch.as_tensor(r).to(device)#, non_blocking=True)
+            d = torch.as_tensor(d).to(device)#, non_blocking=True)
+
+            profile('eval_forward', epoch)
+            with torch.no_grad(), self.amp_context:
+                state = dict(
+                    reward=r,
+                    done=d,
+                    env_id=env_id,
+                    mask=mask,
+                )
+
+                if config['use_rnn']:
+                    state['lstm_h'] = self.lstm_h[env_id.start]
+                    state['lstm_c'] = self.lstm_c[env_id.start]
+
+                logits, value = self.policy.forward_eval(o_device, state)
+                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                # REWARD CLIP: [-c, c] for c > 0; c <= 0 stores the env rewards unchanged
+                if self.reward_clip > 0:
+                    r = torch.clamp(r, -self.reward_clip, self.reward_clip)
+
+            profile('eval_copy', epoch)
+            with torch.no_grad():
+                if config['use_rnn']:
+                    self.lstm_h[env_id.start] = state['lstm_h']
+                    self.lstm_c[env_id.start] = state['lstm_c']
+
+                # Fast path for fully vectorized envs
+                l = self.ep_lengths[env_id.start].item()
+                batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
+
+                if config['cpu_offload']:
+                    self.observations[batch_rows, l] = o
+                else:
+                    self.observations[batch_rows, l] = o_device
+
+                self.actions[batch_rows, l] = action
+                self.logprobs[batch_rows, l] = logprob
+                self.rewards[batch_rows, l] = r
+                self.terminals[batch_rows, l] = d.float()
+                self.values[batch_rows, l] = value.flatten()
+
+                # Note: We are not yet handling masks in this version
+                self.ep_lengths[env_id] += 1
+                if l+1 >= config['bptt_horizon']:
+                    num_full = env_id.stop - env_id.start
+                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config['device']).int()
+                    self.ep_lengths[env_id] = 0
+                    self.free_idx += num_full
+                    self.full_rows += num_full
+
+                action = action.cpu().numpy()
+                if isinstance(logits, torch.distributions.Normal):
+                    action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
+
+            profile('eval_misc', epoch)
+            for i in info:
+                for k, v in pufferlib.unroll_nested_dict(i):
+                    if isinstance(v, np.ndarray):
+                        v = v.tolist()
+                    elif isinstance(v, (list, tuple)):
+                        self.stats[k].extend(v)
+                    else:
+                        self.stats[k].append(v)
+
+            profile('env', epoch)
+            self.vecenv.send(action)
+
+        profile('eval_misc', epoch)
+        self.free_idx = self.total_agents
+        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
+        self.ep_lengths.zero_()
+        profile.end()
+        return self.stats
 
     # ------------------------------------------------------------------ train
     # WHY A COPY: PuffeRL.train() builds and back-propagates the loss inside one method, with no
     # hook for an extra term. The body below is PufferLib 3.0's PuffeRL.train() (pufferl.py,
     # 3.0 branch commit 3b5c604) copied statement for statement (one commented-out block of the
-    # original dropped); the additions are the three blocks marked "MMD" and the "AMP" fix (the
-    # autocast context wraps only forward + loss and is exited before backward; the base entered
-    # it twice per minibatch and never exited). With mmd_coef == 0 no MMD block runs and in
+    # original dropped); the additions are the three blocks marked "MMD", the two marked "ENTROPY
+    # SPLIT" (SPEC §19.2.2-3) and the "AMP" fix (the autocast context wraps only forward + loss and
+    # is exited before backward; the base entered it twice per minibatch and never exited). With
+    # mmd_coef == 0 no MMD block runs, with the split unset the entropy term is the base's and the
+    # logged H_card / H_pos are computed under no_grad from detached logits (no RNG), and in
     # float32 the AMP context is a no-op, so the losses, the RNG draws (multinomial minibatch
     # sampling) and the parameter updates are exactly the base class's.
     @record
@@ -232,6 +519,12 @@ class MMDPuffeRL(pufferl.PuffeRL):
             with self.amp_context:
                 logits, newvalue = self.policy(mb_obs, state)
                 actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+                # ENTROPY SPLIT (1/2): H_card / H_pos per row; outside the graph unless they enter the loss
+                if self.entropy_split:
+                    h_card, h_pos = entropy_split(logits)
+                else:
+                    with torch.no_grad():
+                        h_card, h_pos = entropy_split(logits.detach())
 
                 profile('train_misc', epoch)
                 newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -261,7 +554,12 @@ class MMDPuffeRL(pufferl.PuffeRL):
 
                 entropy_loss = entropy.mean()
 
-                loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+                # ENTROPY SPLIT (2/2): -(c_card mean(H_card) + c_pos mean(H_pos)) replaces -ent_coef mean(H_joint)
+                if self.entropy_split:
+                    loss = pg_loss + config['vf_coef']*v_loss - (self.ent_coef_card*h_card.mean()
+                                                                 + self.ent_coef_pos*h_pos.mean())
+                else:
+                    loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
 
                 # MMD (1/3): + mmd_coef * KL(pi_theta || pi_ref), differentiated through pi_theta only
                 if self.mmd_coef > 0:
@@ -277,6 +575,8 @@ class MMDPuffeRL(pufferl.PuffeRL):
             losses['policy_loss'] += pg_loss.item() / self.total_minibatches
             losses['value_loss'] += v_loss.item() / self.total_minibatches
             losses['entropy'] += entropy_loss.item() / self.total_minibatches
+            losses['entropy_card'] += h_card.mean().item() / self.total_minibatches
+            losses['entropy_pos'] += h_pos.mean().item() / self.total_minibatches
             losses['old_approx_kl'] += old_approx_kl.item() / self.total_minibatches
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
@@ -329,4 +629,5 @@ class MMDPuffeRL(pufferl.PuffeRL):
         return logs
 
 
-__all__ = ["MMDPuffeRL", "masked_kl", "obs_mask", "make_amp_context"]
+__all__ = ["MMDPuffeRL", "masked_kl", "obs_mask", "make_amp_context", "entropy_split", "shaping_env_kwargs",
+           "shaping_anneal_steps", "warn_shaping_clip", "SHAPING_WEIGHTS", "WandbLogger"]

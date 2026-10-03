@@ -11,7 +11,10 @@ Schedule: for every pair of agents (i < j) and every deck pairing -- agent i wit
 j with deck Y, over all (X, Y) in --decks x --decks (--deck-mode all, default) or X = Y
 (--deck-mode mirror) -- play --matches full matches, agent i in seat 0 for the even-numbered
 ones and in seat 1 for the others (half per seat). Every match has its own deterministic seed
-derived from --seed. Policies act greedily (argmax of the masked logits) unless --sample.
+derived from --seed. Policies sample their actions from the masked policy (SPEC §19.11; seeded per
+match, so the tournament is deterministic given --seed); --greedy plays the card-first greedy rule
+instead (the most likely of wait / the 4 card slots by marginal probability, then that slot's most
+likely tile). --sample is still accepted and does nothing (sampling is the default).
 
 Output: the payoff matrix P[i][j] (agent i's mean score vs j, win 1 / draw 0.5 / loss 0),
 maximum-likelihood Bradley-Terry Elo ratings (mean 1500) and the Nash equilibrium mixture of the
@@ -19,6 +22,8 @@ symmetric meta-game A = P - 0.5 (the population mixture no agent beats on averag
 JSON with keys agents, payoff, elo, nash (+ games, nash_value, decks, results, ...).
 
 Decks: presets, 'random', or 8 comma-separated card names / ids; repeated decks are played once.
+Placement grid (SPEC §19.4): every checkpoint plays through its own grid (its coarse actions are
+mapped to fine plays by Game.coarse_to_fine), so checkpoints of different grids can meet.
 Match settings: each checkpoint decides at the frame_skip it was trained with and the game uses
 the checkpoints' deploy lockout / tiebreak / tower troops (from their runs' config.json), with a
 warning whenever a checkpoint plays under other settings; --frame-skip N (all agents) and
@@ -46,7 +51,10 @@ def make_parser():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--deck-mode", choices=["all", "mirror"], default="all",
                     help="all: every (X, Y) deck pairing; mirror: both agents use the same deck")
-    ap.add_argument("--sample", action="store_true", help="policies sample actions instead of the argmax")
+    ap.add_argument("--greedy", action="store_true",
+                    help="policies play the card-first greedy rule (SPEC §19.11) instead of sampling")
+    ap.add_argument("--sample", action="store_true",
+                    help="accepted for compatibility; does nothing (policies sample by default)")
     ap.add_argument("--quiet", action="store_true", help="no per-pair progress lines")
     ap.add_argument("--frame-skip", type=int, help="decision cadence (ticks) for EVERY agent (default: each "
                                                    "checkpoint's training frame_skip, bots 10)")
@@ -106,7 +114,7 @@ def main():
         pairings = [(x, y) for x in range(len(decks)) for y in range(len(decks))]
     else:
         pairings = [(x, x) for x in range(len(decks))]
-    greedy = not args.sample
+    greedy = bool(args.greedy)                     # --sample is a no-op (SPEC §19.11)
     t0 = time.time()
     results = []
     for i in range(n):
@@ -147,7 +155,8 @@ def main():
         mean = float(np.mean(others)) if others else 0.5
         print(f"{names[i]:>{w}s}   {ratings[i]:7.1f}  {x[i]:6.3f}  {mean:10.3f}")
     note = " (ML diverges for unbeaten agents: one virtual draw per pair added)" if info["regularised"] else ""
-    print(f"\n{len(results)} matches in {time.time() - t0:.1f} s; meta-game value {value:+.2e}{note}")
+    print(f"\n{len(results)} matches ({'card-first greedy' if greedy else 'sampled'} policy actions) in "
+          f"{time.time() - t0:.1f} s; meta-game value {value:+.2e}{note}")
 
     out = {"agents": agents, "payoff": P.tolist(), "elo": [float(r) for r in ratings], "nash": [float(v) for v in x],
            "nash_value": float(value), "games": G.tolist(), "elo_regularised": bool(info["regularised"]),

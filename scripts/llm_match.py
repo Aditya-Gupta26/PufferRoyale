@@ -12,7 +12,8 @@ The model plays --deck-agent, the opponent --deck-opp; seats alternate (even-num
 the model is team 0). The model decides every --decision-interval ticks (20 = 1 s of game time);
 bot / checkpoint opponents act every 10 ticks (the env cadence). Opponent: a bot spec
 (bot:noop | bot:random | bot:heuristic), a checkpoint path, or another model spec prefixed with
-"model:" (e.g. model:mock_random).
+"model:" (e.g. model:mock_random). A checkpoint opponent samples its actions from its masked policy
+(seeded by the match seed; SPEC §19.11); --opponent-greedy makes it play the card-first greedy rule.
 
 Output: one progress line per match, then a JSON summary as the LAST stdout line (win/draw/loss,
 score, mean crowns, illegal / parse-error / model-error rates per decision, mean latency). With
@@ -40,6 +41,9 @@ def make_parser():
     ap.add_argument("--opponent", default="bot:heuristic",
                     help="bot:noop | bot:random | bot:heuristic | <checkpoint path> | model:<model spec> "
                          "(default bot:heuristic)")
+    ap.add_argument("--opponent-greedy", action="store_true",
+                    help="a checkpoint opponent plays the card-first greedy rule (SPEC §19.11) instead of "
+                         "sampling")
     ap.add_argument("--deck-agent", default="hog26", help="the model's deck (preset or 'random'; default hog26)")
     ap.add_argument("--deck-opp", default="hog26", help="the opponent's deck (default hog26)")
     ap.add_argument("--matches", type=int, default=10, help="number of matches, seats alternating (default 10)")
@@ -80,6 +84,7 @@ def summarize(model, opponent, args, results, transcripts_path):
         "mean_latency_s": (sum(r["mean_latency_s"] * r["decisions"] for r in results) / dec) if dec else 0.0,
         "mean_ticks": sum(r["ticks"] for r in results) / max(n, 1),
         "seed": args.seed, "decision_interval": args.decision_interval, "transcripts": transcripts_path,
+        "opponent_greedy": bool(args.opponent_greedy),
     }
 
 
@@ -148,7 +153,7 @@ def main():
         n0 = len(agent.transcript)
         r = llm.play_llm_match(agent, opponent, args.deck_agent, args.deck_opp, seed, agent_team=team,
                                decision_interval=args.decision_interval, max_ticks=args.max_ticks,
-                               skip_idle=args.skip_idle)
+                               skip_idle=args.skip_idle, greedy=args.opponent_greedy)
         r.update(match=k, seed=seed)
         results.append(r)
         if transcripts_path:

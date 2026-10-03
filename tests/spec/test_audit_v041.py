@@ -640,10 +640,11 @@ def test_recurrent_wrapper_keeps_the_policy_init_scale(pr):
         return float(ws[0].float().std())
     ratios = []
     for seed in range(3):
+        # v0.5 §19.6: the 2305-wide actor Linear is the "flat" head (the default is "conditional")
         torch.manual_seed(seed)
-        s_plain = actor_std(prt.Policy(env))
+        s_plain = actor_std(prt.Policy(env, head="flat"))
         torch.manual_seed(seed)
-        s_rec = actor_std(prt.Recurrent(env, prt.Policy(env)))
+        s_rec = actor_std(prt.Recurrent(env, prt.Policy(env, head="flat")))
         ratios.append(s_rec / s_plain)
     env.close()
     assert all(0.8 <= r <= 1.25 for r in ratios), f"Recurrent(Policy) actor init std / Policy's: {ratios}"

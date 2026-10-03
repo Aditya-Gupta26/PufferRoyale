@@ -13,12 +13,12 @@ from pufferroyale import royale as R
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # SPEC §16.4 / §16.6.16 (v0.3): card identities as integer ids (card_id + 1), 128-wide multi-hots,
-# the tower-troop one-hots appended after opp_elixir_ub
+# the tower-troop one-hots appended after opp_elixir_ub; SPEC §19.3 (v0.5): own_deck appended last
 SPEC_SCALARS = [("elixir", 1), ("hand", 4), ("hand_cost", 4), ("next_card", 1), ("affordable", 4),
                 ("tick", 1), ("overtime", 1), ("elixir_rate", 1), ("lockout", 1), ("own_towers", 3),
                 ("enemy_towers", 3), ("king_active", 2), ("crowns", 2), ("opp_seen", 128), ("opp_spent", 1),
                 ("opp_last4", 4), ("opp_deduced_hand", 128), ("opp_elixir_ub", 1), ("own_tower_troop", 4),
-                ("enemy_tower_troop", 4)]
+                ("enemy_tower_troop", 4), ("own_deck", 8)]
 
 
 def ids(v):
@@ -29,8 +29,8 @@ def test_layout_matches_spec_v03():
     assert R.SPATIAL_SHAPE == (25, 32, 18)
     assert R.ENTITY_SHAPE == (64, 11) and R.CARD_SLOTS == 128
     assert R.ENTITY_FEATURES[0] == "card_id" and len(R.ENTITY_FEATURES) == 11
-    assert R.SCALAR_SIZE == 298 and R.MASK_SIZE == 2305
-    assert R.OBS_SIZE == 25 * 576 + 64 * 11 + 298 + 2305
+    assert R.SCALAR_SIZE == 306 and R.MASK_SIZE == 2305
+    assert R.OBS_SIZE == 25 * 576 + 64 * 11 + 306 + 2305 == 17715
     off = 0
     assert list(R.SCALAR_INDEX) == [n for n, _ in SPEC_SCALARS]
     for (name, n), (k, (o, ln)) in zip(SPEC_SCALARS, R.SCALAR_INDEX.items()):

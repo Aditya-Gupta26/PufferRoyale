@@ -52,8 +52,9 @@ def test_v3_layout_constants(pr):
         end = off + size
     assert end <= m.OBS_SIZE
     lay = E3.v3_layout()
-    assert sum(n for _, n in lay.values()) == E3.V3_TOTAL == 298
-    assert m.SCALAR_SIZE >= 298
+    # v0.5 §19.3: own_deck (8) appended after enemy_tower_troop -> 306 canonical scalars
+    assert sum(n for _, n in lay.values()) == E3.V3_TOTAL == 306
+    assert m.SCALAR_SIZE == 306
 
 
 def test_v3_scalar_layout_values(pr):

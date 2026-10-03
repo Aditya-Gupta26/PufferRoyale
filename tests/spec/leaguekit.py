@@ -40,12 +40,14 @@ def make_ckpt(path, recurrent=False, noop_bias=None, seed=0):
 
     `noop_bias`: add this to the logit bias of action 0 (the unique 2305-long bias tensor of the
     action head), to craft a policy whose greedy choice is always the no-op while sampling still
-    plays cards (used for the opponent_greedy test)."""
+    plays cards (used for the opponent_greedy test). Since v0.5 (§19.6) the default head is
+    "conditional"; the 2305-long actor bias exists in the v0.4 head, `head="flat"`, which is used
+    whenever `noop_bias` is given."""
     import torch
     import pufferroyale.torch as prt
     env = policy_env()
     torch.manual_seed(seed)
-    policy = prt.Policy(env)
+    policy = prt.Policy(env, head="flat") if noop_bias is not None else prt.Policy(env)
     if recurrent:
         policy = prt.Recurrent(env, policy)
     sd = policy.state_dict()

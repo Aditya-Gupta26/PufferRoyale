@@ -171,7 +171,11 @@ pool size and `opponent=score/games` for the episodes that finished in that epoc
 Evaluation uses the settings a checkpoint was trained with: `tournament.py`, `best_response.py`,
 `eval.py` and `metagame.play_match` read frame_skip, deploy lockout, tiebreak and tower troops from the
 run's `config.json` (each checkpoint decides at its own frame_skip; bots every 10 ticks) and warn when a
-checkpoint plays under other settings; `--frame-skip N` / `--ignore-train-config` override. Checkpoint
+checkpoint plays under other settings; `--frame-skip N` / `--ignore-train-config` override. Every
+tool that plays a policy samples its actions from the masked policy by default, seeded so results
+are reproducible (SPEC §19.11). `--greedy` (`greedy=True` in Python) plays the card-first greedy
+rule instead: the most likely of wait and the four card slots by marginal probability, then that
+slot's most likely tile (`pufferroyale.league.greedy_actions`). Checkpoint
 arguments accept a `.pt` file, `ckpt:<path>` or a run directory; decks accept presets or 8
 comma-separated card names / ids. Every script trains with `MMDPuffeRL` (plain PPO at `--mmd-coef 0`),
 whose bf16 autocast never reuses stale weight casts (SPEC §18.6).
@@ -194,6 +198,42 @@ the other seat is played by the opponent drawn from the pool for that episode (p
 batched without grad, bots in C), so opponent transitions never reach the PPO buffer. The
 learner's seat is drawn per episode. Everything is deterministic given the seeds. HPC (NYU
 Torch, Apptainer + SLURM) templates are in [`hpc/`](hpc/README.md).
+
+### Training operations (v0.5, SPEC §19; plan in [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md))
+
+```bash
+# reward v2 (potential-based, zero-sum; reward_gamma = train.gamma is injected), annealed to 0 over
+# the first 30% of the run; coarse placement grid (4x4 blocks: 161 actions); deck sampling
+python scripts/league_train.py --total-timesteps 2000000 --shaping-anneal-frac 0.3 \
+    --env.reward-tower 0.3 --env.reward-crown 0.2 --env.reward-elixir 0.02 --train.reward-clip 0 \
+    --env.placement-grid 4 --env.deck-pool "hog26;giant:2;random:50:0" --env.random-deck-frac 0.1
+# policy / trainer keys: --policy.head flat|conditional, --policy.card-stats 0|1, --policy.pos-channels N,
+#   --train.ent-coef-card X --train.ent-coef-pos Y (both or neither)
+# warm start (weights only, same architecture) and early stop at a snapshot epoch once the score over
+# the last N matches vs EVERY anchor is >= X
+python scripts/league_train.py --init-from experiments/league/<run> --anchors bot:heuristic \
+    --early-stop-score 0.6 --early-stop-window 2000
+# train.py: continue a run (absolute target), or start a new one from any checkpoint's weights
+python scripts/train.py --resume experiments/pufferroyale_<run_id> --total-timesteps 2000000
+python scripts/train.py --init-from experiments/league/<run>/snap_40.pt --shaping-anneal-frac 0.2
+# bot ladder: chained league runs gated on the score vs each anchor; writes <data-dir>/stages_<P>.json
+python scripts/stages.py --run-prefix S1 --rungs "bot:noop:5000000:0.95;bot:random:50000000:0.90" \
+    --gate-window 2000 --num-envs 256 --device cuda          # other flags go to every rung
+# eval: per deck (each as a mirror) + pooled rows, Wilson 95% intervals (ci95) in the JSON
+python scripts/eval.py --checkpoint experiments/league/<run> --decks "hog26;giant;random:5:0" --json e.json
+# best response that starts from the target's own weights
+python scripts/best_response.py --target experiments/league/<run>/snap_40.pt --init-from-target
+# within-run transitivity of the snapshots (payoff, Elo, Nash, later_beats_earlier, cyclic_triads)
+python scripts/transitivity.py --run experiments/league/<run> --snapshots 10 --matches 100 --out tr.json
+# score per opponent and losses vs step from history.jsonl (pip install -e '.[plots]' for matplotlib)
+python scripts/plot_history.py experiments/league/<run> --out curves.png
+# Weights & Biases (train.py and league_train.py; WANDB_MODE=offline works without network; without
+# --wandb, wandb is never imported)
+python scripts/league_train.py --wandb --wandb-project pufferroyale --wandb-group s1 --tag v05 ...
+```
+
+`config.json` records the env kwargs actually used (incl. `reward_gamma`, the anneal keys and
+`placement_grid`); every tool plays a checkpoint through its own placement grid.
 
 ## Play against LLMs (SPEC §17)
 
@@ -314,12 +354,13 @@ tower_troop1="royal_chef")`, `Royale(..., tower_troop0=..., tower_troop1=...)` o
 `--env.tower-troop0 dagger_duchess` in `train.py`; values `princess` (default), `cannoneer`,
 `dagger_duchess`, `royal_chef`. Both tower troops are visible in the observation.
 
-**Observation (v0.3, SPEC §16.4).** `OBS_SIZE = 17707` = 25 spatial planes x 32 x 18 + 64 entity
-rows x 11 + 298 scalars + the 2305-long action mask. Card identities are integer ids `card_id + 1`
-(0 = empty) in entity feature 0 and in the `hand`, `next_card` and `opp_last4` scalars; opponent
-cards seen / deduced hand are 128-wide multi-hots; `own_tower_troop` / `enemy_tower_troop` are
-4-wide one-hots. Offsets: `R.SCALAR_INDEX`, `R.ENTITY_FEATURES`, `R.CARD_SLOTS`. Checkpoints from
-before v0.3 do not load.
+**Observation (v0.5, SPEC §16.4 + §19.3).** `OBS_SIZE = 17715` = 25 spatial planes x 32 x 18 + 64 entity
+rows x 11 + 306 scalars + the 2305-long action mask. Card identities are integer ids `card_id + 1`
+(0 = empty) in entity feature 0 and in the `hand`, `next_card`, `opp_last4` and `own_deck` (the own
+deck as a set, ascending ids) scalars; opponent cards seen / deduced hand are 128-wide multi-hots;
+`own_tower_troop` / `enemy_tower_troop` are 4-wide one-hots. Offsets: `R.SCALAR_INDEX`,
+`R.ENTITY_FEATURES`, `R.CARD_SLOTS`. The mask stays the fine 2305-mask under any `placement_grid`;
+`R.action_mask(obs, grid)` derives the coarse one. Checkpoints from before v0.5 do not load.
 
 ## Layout
 

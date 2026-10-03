@@ -446,3 +446,330 @@ project owner was away; they are open for review.
 - **Evidence:** the audit's bot-driven mirror fuzz found Chef divergences in 10 of 300 matches. It now
   reports 0 divergences over 1000 random matches and 300 matches per tower troop. A port of it
   (`tests/c/test_mirror.c`) fails 5 of 195 matches when the Chef order is reverted.
+
+---
+
+## Builder-1 decisions, training work package, env side (SPEC §19 / v0.5-G, 2026-10-02)
+
+### D46 — Reward v2 lives in the C env, in double, with a step counter that never resets
+- **Decision:** `royale.h` computes the potential, the anneal multiplier and `F` per `c_step`, stores
+  `Phi_prev` per match and counts `c_step`s in an int64 that no reset touches (SPEC §19.1). `r_1` is
+  `0.0f - r_0`, which is the exact negation and never produces -0, so all-zero weights stay
+  bit-identical to v0.4. The v0.4 tower / crown difference shaping is gone (same keyword names).
+- **Why:** the per-env counter works unchanged for in-process vectorisation, the Multiprocessing
+  backend and `LeagueVecEnv` without any cross-process setter (TRAINING_PLAN §3.3).
+- **Reverse if:** annealing must follow the learner's global step exactly across envs with different
+  step rates (then pass a setter, and reach the Multiprocessing workers).
+
+### D47 — `own_deck` appended after the tower troops; the policy picks it up through CARD_ID_SCALARS
+- **Decision:** exactly SPEC §19.3 (offset 298, OBS_SIZE 17,715). Existing offsets are unchanged.
+  Adding `own_deck` to `CARD_ID_SCALARS` makes the current `torch.Policy` embed it without code
+  changes. Pre-v0.5 checkpoints no longer match the scalar layer, which is expected.
+
+### D48 — One coarse-to-fine decoder in C, shared by the env and `Game.coarse_to_fine`
+- **Decision:** `royale_coarse_to_fine` checks the tile-independent refusals once through
+  `pr_check_play`, then tests each block tile with `pr_card_tile_legal_ctx` on one legality context.
+  That is the code path of the fine mask, so the candidate set is the fine mask by construction, at
+  one context build per action instead of up to 16. Grid-1 rows keep the v0.4 decode path.
+- **Evidence:** exhaustive checks on bot-driven states: about 99k coarse-legal actions in C, all three
+  grids and both teams, plus the Python brute force against `legal_mask`. Mutating the tie rule
+  fails them.
+
+### D49 — "Fine actions" as a per-row grid
+- **Options:** a per-row fine flag (the SPEC's example), or a per-row grid. **Decision:** a per-row
+  grid `row_grid[row]` in {1, 2, 4} (`Royale.set_row_grid`, `binding.env_set_row_grid`). Grid 1
+  means fine actions. `LeagueVecEnv` sets the opponent row to 1 for `bot:` opponents and to the env's
+  grid otherwise, at every episode start.
+- **Why:** it costs the same as a flag, and it also lets a tool play a checkpoint whose grid differs
+  from the env's (e.g. a g = 1 checkpoint as a league anchor next to a g = 2 learner), which SPEC
+  §19.4 asks of the tools.
+
+### D50 — The deck sampler is fixed-capacity C state with its own stream
+- **Decision:** pool decks (ids + cumulative 2^-32 weight thresholds), held-out card-set masks and
+  counters live inline in the env (256 / 1024 capacity, about 14 KB per match; no allocation).
+  Python parses deck-set strings (`pufferroyale.decks`) and passes id lists in their installed card
+  order: a preset keeps its own order, any other deck is ascending (ruling v0.5-G.1). The deal draws from
+  `PR_DECK_STREAM`. Construction draws, then reseeds every stream, as v0.4 does for the game stream.
+- **Why:** deals happen inside `c_step` (auto-reset), so the sampler must be in C to stay
+  deterministic and cheap. Masks make the held-out test a 64-bit compare.
+
+### D51 — Deck-set grammar choices
+- **Decision:**
+  - Empty items are skipped.
+  - Whitespace is ignored around items and `:`, but `file:PATH` keeps spaces inside the path (the
+    project path itself has spaces).
+  - `random:N:SEED` needs N >= 1.
+  - Python lists accept every string item plus `(deck, weight)` pairs, so `parse_deck_set` is
+    idempotent.
+  - `deck_key` is a string (`"2-4-9-..."`), usable as a JSON key.
+  - `random_decks` is a prefix-stable numpy PCG64 draw.
+- **Reverse if:** the tester or orchestrator wants a stricter grammar (e.g. rejecting a trailing `;`).
+
+### D52 — Per-card play rates are counted in Python from the observations
+- **Decision:** `royale.CardStats` updates vectorised numpy counters from each decision's observation
+  and action. `Royale.step` counts every row (before `vec_step`); `LeagueVecEnv.send` counts the
+  learner rows. The counters are emitted into the log dict.
+- **Why:** the C `Log` is averaged over episodes by `vec_log`, while play rates are ratios of decision
+  counts. Putting 128 counters into the Log would distort both. The update costs a few small numpy
+  operations per step.
+
+## Builder-2 decisions, training work package, trainer / policy / tools side (SPEC §19 / v0.5-G.2, 2026-10-03)
+
+(D53–D59 are not used.)
+
+### D60 — Conditional head: a card MLP plus a full-resolution FiLM board map
+- **Decision:** (a) `wait_logit = Linear(h, 1)`; slot `s` = `slot_logit(ReLU(Linear([h, enc(hand_s)])))`,
+  one MLP shared by the four slots. (b) `pos_board` = three 3x3 convs at 32 x 18 with dilations
+  1, 2, 4 (receptive field 15 tiles, `pos_channels` wide). Per slot it is modulated by FiLM
+  `ReLU(board * (1 + γ_s) + β_s)`, with `(γ_s, β_s) = Linear(cond_s)`, where `cond_s` is the slot MLP's
+  hidden vector. A 1x1 conv then gives the 32 x 18 logit map. For g > 1 a fixed (576, B) matrix
+  averages each block over the tiles it really has. (c) Both factors are `log_softmax` over
+  masked logits (`finfo.min`), in float32: card over {wait, slot 0..3} with a slot masked iff its
+  segment has no legal action, and position per slot. Then `joint = log P(s) + log P(j | s)`, and
+  illegal entries are set to `finfo.min` again. `wait_logit`, `slot_logit`, `film` and `pos_out`
+  are initialised with std 0.01, so the head starts near uniform per factor and FiLM starts near
+  the identity. The flat head is the v0.4 `actor` unchanged. `decode_actions(hidden)` without the
+  observations returns the flat head's unmasked logits (the bare PufferLib protocol), and the
+  conditional head raises there instead of guessing.
+- **Why:** FiLM conditions four slot maps on one shared board pass, which costs much less than
+  concatenating per-slot condition planes. Full resolution keeps a tile-exact map for g = 1. The
+  head has no grid-dependent parameter, so the grid is a persistent `action_grid` buffer (D63).
+- **Reverse if:** profiling on the GPU shows the board pass dominates; then lower `pos_channels`
+  or pool before the 1x1 conv.
+
+### D61 — Recurrent: the wrapper's forward copied, with the observations passed to the decoder
+- **Decision:** `Recurrent.forward` / `forward_eval` copy PufferLib 3.0's `LSTMWrapper` methods
+  statement for statement. The one change is `decode_actions(hidden, observations)`, which passes
+  the observations of exactly the rows being decoded. The flattened `(B*T)` order of the LSTM
+  output equals `observations.reshape(-1, OBS_SIZE)`. Nothing is stored on the module between
+  calls. `LSTMWrapper.__init__` re-initialises every parameter it can see, so `Recurrent` saves
+  the wrapped Policy's state dict first and restores it afterwards. The wrapper still makes its
+  random draws, so the global RNG stream is unchanged.
+- **Why:** the conditional head needs the board planes, the hand and the mask of the same rows,
+  and the wrapper only forwards the LSTM output (SPEC §19.6 [IMPL-DEFINED]).
+- **Reverse if:** PufferLib gains a decoder hook that carries the observations.
+
+### D62 — Card-stat table details
+- **Decision:** the columns are those of SPEC §19.6 / §19.9.7 (`CARD_STAT_NAMES`), with these
+  details:
+  - Raw values come from `binding.card_info`. A missing, `None` or non-numeric field is 0, and
+    booleans are 0/1.
+  - DPS = `damage * 1000 / hit_speed_ms`, or 0 when the hit speed is 0.
+  - Unit splash = `max(area_damage_radius_milli, projectile.radius)`.
+  - Flying = `flying_height > 0`, charges = `charge_range > 0`, and "spawns units" =
+    `spawner or death_spawn`.
+  - Negative values are clamped to 0 (no card has one).
+  - `log1p` is applied to hitpoints, damage, DPS and death damage before scaling.
+  - Every column is divided by its maximum over the 64 cards. An all-zero column stays 0.
+  
+  The float64 table becomes a float32 non-persistent buffer. `card_stat_proj = Linear(K,
+  card_dim)` (orthogonal init, gain 1) and the embedding are concatenated, so `enc_dim =
+  2 * card_dim`. `enc` is used for the 17 card-id scalars, the entity ids and the conditional
+  head's hand cards. `card_stats` accepts 0/1, booleans and "true"/"false".
+- **Why:** this is a deterministic, fixed prior that also covers cards an agent rarely sees.
+  Because it is not in the state dict, a checkpoint never carries a stale table.
+
+### D63 — Checkpoints carry their architecture and grid; every tool plays them on their own grid
+- **Decision:** `policy_kwargs_from_state_dict` reads the following from the tensors:
+  - the sizes (`hidden_size` from `value.weight`, so both heads work);
+  - head = flat iff `actor.*` is present;
+  - `card_stats` iff `card_stat_proj.*` is present;
+  - `pos_channels` from `pos_out.weight`;
+  - the grid from the `action_grid` buffer (else from the flat actor's width, else 1).
+  
+  Loading a state dict of another grid raises. `league.load_weights` (`--init-from`) requires the
+  whole architecture to be equal: the sizes, head, card stats, pos channels, grid, and recurrence
+  with its LSTM sizes. The error names each difference. At every episode start `LeagueVecEnv` sets
+  both rows' grids through D49's per-row grid: the learner and self-play use the env grid, a bot
+  uses 1, and a `ckpt:` opponent uses its own grid. `eval.py` / `watch.py` / `tournament.py` /
+  `metagame` play a checkpoint on the grid its weights carry. When `config.json` disagrees,
+  `eval.py` warns and uses the weights' grid.
+- **Why:** the weights are the ground truth, and a grid mismatch would silently misread every
+  action.
+
+### D64 — Early stop and the stage ladder
+- **Decision:** `league_train.py` keeps one deque per anchor of the last N outcomes (+1/0/-1).
+  It stores them in `league_state.json` (`early_stop.recent`), so a resume keeps them. The test
+  runs only at snapshot epochs, after the snapshot and before the save. The save, the
+  `history.jsonl` record and the summary then carry `early_stopped`. The run finishes normally
+  (final model; wandb `early_stop = true`). An early-stopped run is finished, so a later
+  `--resume` reports `nothing_to_do`. `--early-stop-score` without an anchor, or with
+  `--snapshot-interval 0`, is an error. `stages.py` works as follows:
+  - Each rung is a new run `<P>_<i>_<anchor kind>` with an absolute budget.
+  - The flags it sets per rung are refused when forwarded.
+  - A rung whose directory already holds a run is resumed (preemption).
+  - Each gate is recomputed from `history.jsonl`'s per-match outcomes, not from the summary, so a
+    rung that ran to its budget can still pass.
+  - Rung i > 0 starts from rung i-1's newest `model_*.pt`.
+  - The exit code is 0 (all passed), 1 (a gate failed) or 2 (a rung's process failed).
+- **Why:** with the outcomes persisted, a preempted ladder behaves like an uninterrupted one. A
+  gate read from the run's own record cannot disagree with what the run logged.
+
+### D65 — Entropy split
+- **Decision:** `entropy_split` works from `log_softmax` and `logsumexp`: `log P(s)` is the
+  logsumexp of the slot's joint log-probs, and `log p(j|s)` is the difference. Every `p log p`
+  term is guarded by `p > 0`, so it stays finite with `finfo.min` logits and with wait-only rows.
+  When the split is unset it runs on detached logits under `no_grad` and uses no RNG, so `train()`
+  stays identical to the base class. `losses/entropy_card` / `entropy_pos` are logged in both
+  modes. Any negative coefficient means unset. Exactly one coefficient set, or a non-finite one,
+  is a `ValueError` at construction.
+
+### D66 — `reward_clip` through a copied `evaluate()`
+- **Decision:** `MMDPuffeRL.evaluate()` is PufferLib 3.0's `PuffeRL.evaluate()` (commit
+  `3b5c604`) copied with one marked block: clamp to `[-c, c]` when `c > 0`, no clamp when
+  `c <= 0`. `None` means 1.0, and a non-finite value raises.
+- **Why:** the base hard-codes `clamp(-1, 1)` inside `evaluate()` with no hook. Potential-based
+  shaping can exceed 1, and the copy keeps every other statement (RNG, buffers) identical.
+
+### D67 — `train.py --resume` / `--init-from`
+- **Decision:** `--resume` takes a `pufferroyale_<run_id>` directory that holds `config.json` +
+  `trainer_state.pt`. It loads the save named in the trainer state: the weights, optimizer
+  (`load_training_state`), epoch, global step and the torch RNG state. `train.py` adds that RNG
+  state to `trainer_state.pt` at every save. The run's `config.json` settings are reused, and
+  flags given again override them. The architecture always comes from the run. Matches in progress
+  are re-dealt from `seed + 7919 * epoch` (as in the league), and a fixed-id logger keeps the run
+  directory. `shaping_step_offset = global_step // R`. `--init-from` is `league.load_weights`
+  (D63) into a new run and cannot be combined with `--resume`.
+
+### D68 — Our own wandb logger
+- **Decision:** `pufferroyale.trainer.WandbLogger` has PufferLib's `WandbLogger` interface
+  (`run_id`, `log(logs, step)`, `upload_model`, `close(model_path, early_stop)`, plus `abort()`
+  for error paths). It calls `wandb.init(project, group, tags, config, resume="allow",
+  settings=Settings(console="off"))` and passes `id` only when resuming. `train.py` passes the
+  `pufferroyale_<run_id>` id; `league_train.py` passes the `wandb_id` saved in `league_state.json`.
+  Both scripts use it. wandb is imported only inside it, so without `--wandb` nothing imports
+  wandb. The league logs one call per `history.jsonl` record at `step = global_step`.
+- **Why:** PufferLib 3.0's class calls `wandb.util.generate_id()`, which recent wandb (0.30)
+  removed, and we never edit the installed PufferLib. Letting `wandb.init` choose the id works
+  across versions.
+
+### D69 — `eval.py` results and JSON
+- **Decision:** results come from the match outcomes. `eval.py` diffs each env's cumulative
+  `env_log_peek` win counters and never calls `vec_log`. Each env plays a fixed quota of full
+  matches. A row has `wins`, `draws`, `losses`, `matches`, `score` and `ci95`, the Wilson interval
+  (`metagame.wilson_interval`, p̂ = score, n = matches; `[0, 1]` for n = 0). With `--decks` each
+  deck is a mirror in its installed order (a preset keeps its order). Its label is the preset name,
+  else `deck_key`. Every deck uses the same seeds (`seed + 17 * seat`), which makes the per-deck
+  rows paired comparisons. The pooled rows follow the per-deck rows. The output is strict JSON
+  (`json_safe`).
+
+## Builder-3 decisions, audit amendments (SPEC §19.10 / v0.5-G.3, 2026-10-03)
+
+### D70 — The anneal length N is a recorded property of the run
+- **Decision:** `trainer.shaping_anneal_steps(F, T, R)` computes `ceil(Fraction(str(F)) * T / R)`.
+  So F = 0.07, T = 3e8, R = 3000 gives 7000, where the float product gave 7001.
+  `shaping_env_kwargs(..., anneal_steps=N)` passes a recorded N through unchanged; the offset is
+  still `global_step // R`.
+  - `league_train.py` keeps N in the run's args as `shaping_anneal_steps`, so `league_state.json`
+    and `config.json` `league` both carry it. A new run computes it. A `--resume` keeps it unless
+    `--shaping-anneal-frac` is given again; then it is recomputed from the new F and the new
+    absolute total.
+  - `train.py` records N as `config.json` `train.shaping_anneal_steps`. "Given again" means
+    `--shaping-anneal-frac` or `--train.shaping-anneal-frac` on the command line.
+  - `best_response.py` (always a new run) records N in its `config.json` `league` args.
+  - A run saved before N was recorded keeps the N its last invocation used. For the league that
+    is `ceil(F * saved total / saved num_envs)`; for `train.py` it is `config.json`
+    `env.shaping_anneal_steps`.
+- **Why:** with N recomputed from a grown `--total-timesteps`, a resume would stretch an anneal
+  that is already under way. Exact rationals make N independent of float rounding.
+
+### D71 — The shaping / clamp warning
+- **Decision:** `trainer.warn_shaping_clip(env_kwargs, reward_clip, prog)` prints one stderr line
+  `[<prog>] warning: reward shaping is on (<weights>) while train.reward_clip = c > 0 ...` when
+  any of `reward_tower`, `reward_crown`, `reward_elixir` or `reward_play` is > 0 and c > 0. Each
+  script calls it once per process: after the env kwargs are final (`train.py`), and after the
+  trainer is built (`league_train.py`, `best_response.py`). A run that has nothing left to do
+  (league `--resume` at its target) does not warn.
+
+### D72 — League history after a preemption
+- **Decision:** on every `--resume`, a "nothing to do" one included, `history.jsonl` is rewritten
+  atomically. It keeps the records with `epoch <= league_state.json["epoch"]` and drops later
+  records and unparsable lines (a torn last line). This happens before the build, so a resume that
+  then fails (for example D77) has already dropped records that every later resume would drop too. A new run in
+  a directory holding `history.jsonl` but no `league_state.json` renames it to
+  `history.jsonl.stale-<k>`, with the smallest free k >= 1. Other leftovers (`snap_*.pt`) are not
+  touched. Both actions add a note to the summary. The early-stop window was already written by
+  every `save()`, the final one in `finish()` included (D64), so nothing changed there.
+
+### D73 — `stages.py` gates on the persisted window and runs in the caller's directory
+- **Decision:** this replaces D64's "gate recomputed from `history.jsonl`". `gate(run_dir,
+  anchor, N)` reads `league_state.json` `early_stop.recent[anchor]` and scores its last <= N
+  outcomes. The lookup is exact; a `ckpt:` anchor also matches after both paths are made absolute.
+  A missing state or anchor gives `(None, 0)`, which fails the gate as insufficient matches.
+  `league_train.py` is started by its absolute path, with no `cwd`, so it inherits the caller's
+  working directory. `--data-dir`, `--init-from` and `--resume` are already absolute.
+- **Why:** `history.jsonl` can hold epochs a preempted process wrote after its last save. The
+  saved window is exactly what the run's own early-stop test saw.
+
+### D74 — Recorded deck sets and the weight cap
+- **Decision:** `decks.expanded_deck_sets(env)` returns `deck_pool_decks` (`deck_entries`
+  order, so a preset keeps its own order, as installed) and `heldout_decks_decks` (ascending,
+  which is how `Royale` installs held-out decks), each a list of `[cards, weight]`. Both are
+  always written, as `[]` when empty, into `config.json` `env` by `train.py`, `league_train.py`
+  and `best_response.py`. They are records only. `train.py --resume` never passes them, or the
+  derived reward keys, back to the env (`DERIVED_ENV_KEYS`), and the spec strings stay the
+  source. `decks._weight` enforces `0 < w <= MAX_WEIGHT = 1e9`, and every weight path (string,
+  list, pair, dict, file) goes through it, so `Royale` and the C binding never see a larger one.
+
+### D75 — The conditional head's position factor in float32 under autocast
+- **Decision:** `Policy._conditional` runs the block pooling matmul, the slot masking, the position
+  log-softmax and the joint assembly inside `torch.autocast(device_type=<device>, enabled=False)`.
+  The input (the 1x1 conv output) is cast with `.float()`. The card factor was already float32
+  (`.float()` before masking). Outside autocast the context is a no-op, so float32 results are
+  bit-identical. The flat head keeps v0.4's `finfo(logits.dtype).min` masking. Its bf16 logits
+  are finite and were not part of the finding.
+
+### D76 — wandb step metric
+- **Decision:** `WandbLogger.__init__` declares `define_metric("global_step")` and
+  `define_metric("*", step_metric="global_step")`. `log(logs, step)` logs `{**logs,
+  "global_step": step}` without wandb's `step=`, so wandb's own counter keeps increasing and
+  records of re-done epochs are kept. wandb is still imported only inside the logger.
+
+### D77 — Clean `--resume` architecture errors
+- **Decision:** `league.architecture_diff(policy, state_dict)` lists the differences (sizes, head,
+  card stats, pos channels, grid, LSTM). `load_weights` now uses it as well.
+  - `league_train.py` checks the built learner against `learner.pt` in `_restore`. Any
+    difference, or a `RuntimeError` from the strict load, raises `SystemExit("--resume <dir>:
+    this invocation builds a different policy than the saved run (...)")`. The constructor's
+    `abort()` then releases the envs and threads.
+  - `train.py` makes the same check right after building the vecenv and policy, before the
+    trainer exists. It also turns a `RuntimeError` from the later load into the same exit.
+  - A corrupt file still fails in `torch.load`, as before.
+  - `train.py` takes `policy`, `rnn_name` and `rnn` from the run, so in practice only
+    `--env.placement-grid` can differ there. The league takes `--rnn` from the run (POOL_KEYS),
+    but `--policy.*`, `--rnn.*` and `--env.placement-grid` overrides can differ.
+
+## Builder-4 decisions, sampling by default (SPEC §19.11 / v0.5-G.5, 2026-10-03)
+
+### D78 — The card-first greedy rule and sampling defaults
+- **Decision:** `league.greedy_actions(logits)` is the only greedy choice. `select_actions(...,
+  greedy=True)` calls it, so league `--opponent-greedy`, `eval.py --greedy`, `best_response.py
+  --greedy`, `tournament.py --greedy`, `watch.py --greedy`, `metagame` (`_PolicyPlayer`,
+  `play_match`, `deck_metagame`) and the LLM-match policy opponents all use it. `eval.py` and
+  `watch.py` no longer take their own argmax.
+  - It takes torch or numpy logits of any dtype and batch shape `(..., 1 + 4B)`, and returns int32
+    of shape `logits.shape[:-1]` (0-d for one row). Other widths raise `ValueError`.
+  - The math is float64 numpy: `exp(x - row max)` over the legal entries, summed per segment.
+    These are the softmax marginals up to one row constant, so their order and ties are the same.
+    `argmax` takes the first maximum, which gives the tie orders of the spec (wait, slot 0..3;
+    smallest `j`).
+  - An entry is illegal when it is `<= max(finfo(input dtype).min, finfo(float32).min)`; NaN is
+    illegal too. So float32-masked logits passed as float64 still read as masked, and bf16
+    logits work. Illegal entries get probability 0 and are never chosen. A row with no legal
+    entry gives 0. The env never makes one, since wait is always legal.
+  - Sampling is unchanged (`torch.multinomial` on `softmax(logits.float())`). `eval.py` now
+    calls `select_actions`, which draws the same samples from the same generator as before.
+- **Defaults:** `play_match`, `deck_metagame` and `play_llm_match` default to `greedy=False`.
+  - `tournament.py` samples. `--greedy` switches, and `--sample` is a no-op kept for old
+    command lines (with both flags, greedy). The JSON `greedy` field is `false` by default. The
+    summary line names the mode.
+  - `watch.py` samples with `torch.Generator().manual_seed(2 * seed)` (team 0's stream in the
+    `metagame` convention), so a given `--seed` replays the match. `--greedy` switches. The last
+    line keeps `policy (team 0) won/lost/drew` and adds `(<n> plays by team 0, <mode> actions)`.
+  - `llm_match.py` gains `--opponent-greedy` and records `opponent_greedy` in its summary.
+  - `hpc/league.sbatch` never passed `--sample`, so its end-of-job tournament now samples.
+- **Why:** with the joint card × tile action the probability of a card is spread over many
+  tiles, so the plain argmax nearly always waits. The CPU learning-check policy won 0/20 greedy
+  matches vs `bot:random` with the argmax, and 18/20 with the card-first rule (20/20 sampled).
+  Over 4 matches the argmax chose a card 3 times in 1,440 decisions; the card-first rule chose
+  one 187 times in 1,471.

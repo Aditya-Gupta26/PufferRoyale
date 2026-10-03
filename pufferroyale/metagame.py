@@ -6,8 +6,16 @@
     metagame_nash(P) -> (x, value)       Nash mixture of the symmetric meta-game A = P - 0.5
     elo(P, games) -> ratings             maximum-likelihood Bradley-Terry ratings, 400*log10
                                          scale, mean 1500
-    play_match(a, b, deck_a, deck_b, seed, greedy=True) -> +1/0/-1 for a (team 0)
+    play_match(a, b, deck_a, deck_b, seed, greedy=False) -> +1/0/-1 for a (team 0)
     deck_metagame(agent, decks, matches) -> (P, x)   deck-vs-deck scores of one agent + Nash
+    transitivity(P, margin) -> {...}      later-beats-earlier fraction and cyclic triads (SPEC §19.7.7)
+    wilson_interval(score, n) -> [lo, hi] Wilson 95% interval of a score
+
+Policy agents sample their actions (seeded, so every match is deterministic given its seed);
+greedy=True plays the card-first greedy rule (league.greedy_actions, SPEC §19.11).
+
+A checkpoint of placement grid g > 1 plays through its own grid: its coarse actions are mapped to
+fine plays by Game.coarse_to_fine (SPEC §19.4).
 
 Agents (play_match / deck_metagame / scripts/tournament.py): a bot spec "bot:noop" |
 "bot:random" | "bot:heuristic", a checkpoint "ckpt:<path>" or a plain path to a PuffeRL
@@ -223,14 +231,18 @@ class _BotPlayer:
 
 
 class _PolicyPlayer:
-    """Masked policy on Game observations; greedy argmax or seeded sampling; recurrent state kept
-    for the whole match."""
+    """Masked policy on Game observations; seeded sampling or the card-first greedy rule (greedy=True,
+    league.greedy_actions, SPEC §19.11); recurrent state kept
+    for the whole match. A policy of placement grid g > 1 acts in its coarse action space; act()
+    returns the fine action that plays (Game.coarse_to_fine, the env's own C mapping; SPEC §19.4)."""
 
     def __init__(self, policy, recurrent, greedy, seed):
         import torch
         from .league import policy_device
+        from .torch import policy_grid
         self.torch = torch
         self.policy, self.recurrent, self.greedy = policy, recurrent, greedy
+        self.grid = policy_grid(policy)
         self.device = policy_device(policy)
         self.gen = torch.Generator(device="cpu").manual_seed(int(seed) & ((1 << 63) - 1))
         self.state = {"lstm_h": None, "lstm_c": None}
@@ -244,7 +256,10 @@ class _PolicyPlayer:
                 logits, _ = self.policy.forward_eval(x, self.state)
             else:
                 logits, _ = self.policy.forward_eval(x, {})
-            return int(select_actions(logits, self.greedy, self.gen)[0])
+            a = int(select_actions(logits, self.greedy, self.gen)[0])
+        if self.grid > 1 and a:
+            a = game.coarse_to_fine(team, a, self.grid)
+        return a
 
 
 def _player(agent, seed, team, greedy, device):
@@ -324,11 +339,12 @@ def match_settings(agents: Sequence, overrides: Optional[dict] = None, use_train
     return {"game": game, "frame_skip": cad, "warnings": warns}
 
 
-def play_match(agent_a, agent_b, deck_a, deck_b, seed, greedy=True, frame_skip=None, device="cpu",
+def play_match(agent_a, agent_b, deck_a, deck_b, seed, greedy=False, frame_skip=None, device="cpu",
                return_info=False, match_config=None, use_train_config=True):
     """One full match through pufferroyale.Game: agent_a plays team 0 with deck_a, agent_b team 1
-    with deck_b. Policy actions are the argmax of the masked logits (greedy=True) or seeded
-    samples. Deterministic given the arguments. Returns agent_a's result: +1 win, 0 draw, -1 loss.
+    with deck_b. Policy actions are seeded samples from the masked policy (default), or the card-first
+    greedy rule with greedy=True (league.greedy_actions, SPEC §19.11). Deterministic given the
+    arguments. Returns agent_a's result: +1 win, 0 draw, -1 loss.
 
     Settings (match_settings): each side decides at its own cadence -- a checkpoint at the
     frame_skip it was trained with (its run's config.json), a bot every 10 ticks -- and the game
@@ -364,6 +380,42 @@ def play_match(agent_a, agent_b, deck_a, deck_b, seed, greedy=True, frame_skip=N
     return result
 
 
+def wilson_interval(score: float, n: int, z: float = 1.959963984540054) -> list:
+    """Wilson 95% score interval [lo, hi] for a proportion p_hat = score (draws counted as 0.5) over
+    n matches (SPEC §19.7.8, §19.9.6); [0, 1] when n = 0."""
+    n = int(n)
+    if n <= 0:
+        return [0.0, 1.0]
+    p = min(1.0, max(0.0, float(score)))
+    z2 = z * z
+    den = 1.0 + z2 / n
+    centre = (p + z2 / (2 * n)) / den
+    half = z * np.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n)) / den
+    return [float(max(0.0, centre - half)), float(min(1.0, centre + half))]
+
+
+def transitivity(P, margin: float = 0.05) -> dict:
+    """Within-run transitivity of agents given in chronological order (SPEC §19.7.7, §19.9.5):
+    later_beats_earlier = fraction of the pairs i < j with P[j][i] > 0.5 (None for fewer than 2
+    agents); pairs = C(n, 2); cyclic_triads = number of unordered triples forming a directed 3-cycle
+    a > b > c > a in which every edge's score is > 0.5 + margin; triads = C(n, 3)."""
+    P = np.asarray(P, dtype=np.float64)
+    if P.ndim != 2 or P.shape[0] != P.shape[1]:
+        raise ValueError("P must be a square matrix")
+    n = P.shape[0]
+    pairs = n * (n - 1) // 2
+    later = sum(1 for i in range(n) for j in range(i + 1, n) if P[j, i] > 0.5)
+    beats = P > 0.5 + float(margin)
+    cyc = 0
+    for a in range(n):
+        for b in range(a + 1, n):
+            for c in range(b + 1, n):
+                if (beats[a, b] and beats[b, c] and beats[c, a]) or (beats[a, c] and beats[c, b] and beats[b, a]):
+                    cyc += 1
+    return {"later_beats_earlier": (later / pairs) if pairs else None, "pairs": int(pairs),
+            "cyclic_triads": int(cyc), "triads": int(n * (n - 1) * (n - 2) // 6)}
+
+
 def match_seed(base: int, *keys: int) -> int:
     """A deterministic per-match seed from a base seed and integer keys (splitmix-style mix)."""
     h = (int(base) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
@@ -374,12 +426,13 @@ def match_seed(base: int, *keys: int) -> int:
     return int(h & 0x7FFFFFFF)
 
 
-def deck_metagame(agent, decks: Sequence, matches: int, seed: int = 0, greedy: bool = True, device="cpu",
+def deck_metagame(agent, decks: Sequence, matches: int, seed: int = 0, greedy: bool = False, device="cpu",
                   return_counts: bool = False, **match_kwargs):
     """The deck meta-game of one agent: for every pair of decks (i < j) the agent plays itself
     `matches` times, deck i in seat 0 for the even-numbered matches and in seat 1 for the others
     (half per seat). P[i][j] = deck i's score vs deck j (antisymmetric, 0.5 on the diagonal);
-    x = its Nash mixture over decks. Returns (P, x)."""
+    x = its Nash mixture over decks. Policy actions are sampled unless greedy=True (play_match).
+    Returns (P, x)."""
     decks = list(decks)
     k = len(decks)
     results = []
@@ -398,4 +451,5 @@ def deck_metagame(agent, decks: Sequence, matches: int, seed: int = 0, greedy: b
 
 
 __all__ = ["solve_zero_sum", "payoff_matrix", "metagame_nash", "elo", "play_match", "deck_metagame",
-           "resolve_agent", "match_seed", "match_settings", "agent_train_config", "MatchSettingsWarning", "DEFAULT_MATCH"]
+           "resolve_agent", "match_seed", "match_settings", "agent_train_config", "MatchSettingsWarning", "DEFAULT_MATCH",
+           "transitivity", "wilson_interval"]

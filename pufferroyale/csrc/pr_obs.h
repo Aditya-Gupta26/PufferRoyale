@@ -22,9 +22,10 @@
  *     Witch Skeletons -> Witch, ...), x/18000 [1], y/32000 [2], hp/max_hp [3], min(1, hp/2000)
  *     [4], flying [5], deploying [6] (also 1 for a burrowing Miner), stunned-or-frozen [7],
  *     slowed [8], is_building [9], target_only_buildings [10]
- *   [SCALARS 298]  the SPEC §9.3 list in its order with the §16.4 encodings (card ids as
- *     card_id + 1, 0 = empty; 128-wide multi-hots indexed by card_id; opponent spent / 200) and
- *     the own / enemy tower-troop one-hots appended (§16.6.16) (PR_OBS_FIELDS / SCALAR_INDEX)
+ *   [SCALARS 306]  the SPEC §9.3 list in its order with the §16.4 encodings (card ids as
+ *     card_id + 1, 0 = empty; 128-wide multi-hots indexed by card_id; opponent spent / 200),
+ *     the own / enemy tower-troop one-hots appended (§16.6.16) and the own deck as a set
+ *     (§19.3: 8 ids card_id + 1, ascending) (PR_OBS_FIELDS / SCALAR_INDEX)
  *   [MASK 2305]  exactly pr_legal_mask (the engine's legality function)
  *
  * Hidden information (SPEC §9): the opponent's current elixir, hand, queue and unrevealed
@@ -75,7 +76,8 @@ enum {
 #define PR_SC_OPP_ELIXIR_UB (PR_SC_OPP_HAND + PR_CARD_SLOTS)
 #define PR_SC_OWN_TT (PR_SC_OPP_ELIXIR_UB + 1)
 #define PR_SC_ENEMY_TT (PR_SC_OWN_TT + PR_N_TOWER_TROOPS)
-#define PR_OBS_SCALAR_SIZE (PR_SC_ENEMY_TT + PR_N_TOWER_TROOPS)
+#define PR_SC_OWN_DECK (PR_SC_ENEMY_TT + PR_N_TOWER_TROOPS) /* SPEC §19.3 */
+#define PR_OBS_SCALAR_SIZE (PR_SC_OWN_DECK + 8)
 
 #define PR_OBS_SPATIAL_OFFSET 0
 #define PR_OBS_ENTITY_OFFSET (PR_OBS_SPATIAL_OFFSET + PR_OBS_SPATIAL_SIZE)
@@ -108,6 +110,7 @@ static const PrObsField PR_OBS_FIELDS[] = {
     {"opp_elixir_ub", PR_SC_OPP_ELIXIR_UB, 1},
     {"own_tower_troop", PR_SC_OWN_TT, PR_N_TOWER_TROOPS},
     {"enemy_tower_troop", PR_SC_ENEMY_TT, PR_N_TOWER_TROOPS},
+    {"own_deck", PR_SC_OWN_DECK, 8},
 };
 #define PR_OBS_N_FIELDS ((int)(sizeof(PR_OBS_FIELDS) / sizeof(PR_OBS_FIELDS[0])))
 
@@ -316,6 +319,15 @@ static inline void pr_obs_write(const PrState *st, int team, float *out) {
     /* SPEC §16.3 / §16.6.16: both tower troops are public information */
     sc[PR_SC_OWN_TT + PR_CLAMP(st->tower_troop[team], 0, PR_N_TOWER_TROOPS - 1)] = 1.0f;
     sc[PR_SC_ENEMY_TT + PR_CLAMP(st->tower_troop[opp], 0, PR_N_TOWER_TROOPS - 1)] = 1.0f;
+    /* SPEC §19.3: the own deck as a set -- ids card_id + 1 in ascending card-id order, never the
+     * hand / queue order (that order is the hidden shuffle) */
+    int8_t deck[8];
+    memcpy(deck, st->deck[team], 8);
+    for (int i = 1; i < 8; i++)
+        for (int j = i; j > 0 && deck[j - 1] > deck[j]; j--) {
+            int8_t tmp = deck[j]; deck[j] = deck[j - 1]; deck[j - 1] = tmp;
+        }
+    for (int k = 0; k < 8; k++) sc[PR_SC_OWN_DECK + k] = pr_obs_card_id(deck[k]);
 
     /* ---- the mask: exactly the engine's legality function ---- */
     uint8_t mask[PR_N_ACTIONS];

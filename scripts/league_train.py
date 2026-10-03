@@ -17,6 +17,7 @@ Run directory <data-dir>/league/<run_id>/:
     learner.pt           latest learner weights; trainer_state.pt: optimizer, epoch, global step
     model_<epoch>.pt     final learner weights + config.json (loadable by eval.py / watch.py)
     history.jsonl        one line per epoch: losses and the learner's results vs each opponent
+                         (games and score, plus the per-match outcomes +1/0/-1 in order)
 
 With --resume <run dir> the run continues from its saved state; --total-timesteps is the
 ABSOLUTE target (a run that already reached it does nothing). Pool-defining options (anchors,
@@ -28,13 +29,44 @@ deterministic given the saved state, but not bit-identical to an uninterrupted r
 progress at the save are re-dealt (from seed + 7919 * epoch); the pool, wrapper and torch RNG
 states continue from the save.
 
+History after a preemption (SPEC §19.10.3): --resume first cuts history.jsonl back to the records
+with epoch <= the saved epoch (the run re-does the later ones); a new run in a directory holding a
+history.jsonl but no league_state.json moves it to history.jsonl.stale-<k>. The early-stop window
+(early_stop.recent) is in league_state.json at every save, the final one included. A --resume that
+would build another architecture, grid or LSTM than the saved run exits with a clear message.
+
 Robustness (SPEC §18.7): every epoch the losses and the learner's weights are checked; a
 non-finite epoch is never snapshotted or saved -- the last good save stays, nonfinite.json
 describes the failure, and the process exits 1. Any error after start-up exits promptly with a
 non-zero status and saves nothing.
 
+v0.5 (SPEC §19.7):
+    --init-from CKPT          start a NEW run from a checkpoint's weights only (file, snapshot or run
+                              directory; new pool and optimizer); the architecture -- sizes, head, card
+                              stats, placement grid, --rnn -- must match (error otherwise); not with --resume
+    --shaping-anneal-frac F   anneal the reward-v2 shaping weights to 0 over the first F of
+                              --total-timesteps (env: shaping_anneal_steps N = ceil(F * total / num_envs),
+                              exact, shaping_step_offset = global_step // num_envs on --resume); 0 =
+                              constant. N is fixed when the run is created (league args) and kept on
+                              --resume, even with a larger --total-timesteps; giving --shaping-anneal-frac
+                              again recomputes it from the new F and total. The env always gets
+                              reward_gamma = train.gamma; shaping weights > 0 with train.reward_clip > 0
+                              print a warning (use --train.reward-clip 0)
+    --early-stop-score X --early-stop-window N
+                              at each snapshot epoch, once every anchor has >= N finished matches and the
+                              learner's score over its last N matches vs every anchor is >= X, the run
+                              saves and finishes normally ("early_stopped": true in the summary); an
+                              early-stopped run is finished (--resume does nothing)
+    --wandb --wandb-project P --wandb-group G --tag T --no-model-upload
+                              log to Weights & Biases (PufferLib's flags, through
+                              pufferroyale.trainer.WandbLogger; WANDB_MODE=offline works without network):
+                              one log call per history.jsonl record at step = global step, with PuffeRL's
+                              environment/* stats (per-card play rates, ...). Without --wandb, wandb is
+                              never imported. These flags are not stored with the run.
+
 Any PuffeRL / env / policy key of pufferroyale/config/royale.ini can also be overridden as
---train.key value, --env.key value, --policy.key value (e.g. --train.learning-rate 1e-4).
+--train.key value, --env.key value, --policy.key value (e.g. --train.learning-rate 1e-4,
+--train.reward-clip 0, --policy.head flat, --env.placement-grid 2).
 --anneal-lr follows one cosine schedule over the absolute --total-timesteps (continued, not
 restarted, on --resume). The last stdout line is a JSON summary (valid JSON: non-finite numbers
 are written as strings).
@@ -60,7 +92,13 @@ DEFAULTS = dict(total_timesteps=1_000_000, device="cpu", num_envs=16, anchors="b
                 pfsp_eps=0.05, self_play_frac=0.2, anchor_frac=0.2, snapshot_interval=10, max_snapshots=16,
                 mmd_coef=0.0, mmd_ref_interval=0, seed=0, data_dir="experiments", deck0="hog26", deck1="hog26",
                 frame_skip=None, bptt_horizon=None, batch_size=None, minibatch_size=None, learning_rate=None,
-                rnn=False, opponent_greedy=False, anneal_lr=False, run_id=None, print_interval=1)
+                rnn=False, opponent_greedy=False, anneal_lr=False, run_id=None, print_interval=1,
+                shaping_anneal_frac=0.0, init_from=None, early_stop_score=None, early_stop_window=2000,
+                shaping_anneal_steps=None)      # N of SPEC §19.10.1: set when the run is created (not a flag)
+# PufferLib logging flags: honoured for the current invocation, never stored with the run (a resumed run
+# logs only when asked to again); value = number of arguments the flag takes
+LOGGING_FLAGS = {"--wandb": 0, "--no-model-upload": 0, "--wandb-project": 1, "--wandb-group": 1, "--tag": 1,
+                 "--neptune": 0, "--neptune-name": 1, "--neptune-project": 1}
 
 
 def make_parser():
@@ -94,7 +132,16 @@ def make_parser():
     ap.add_argument("--anneal-lr", action="store_true", default=None, help="cosine learning-rate annealing")
     ap.add_argument("--rnn", action="store_true", default=None, help="LSTM learner (Recurrent)")
     ap.add_argument("--opponent-greedy", action="store_true", default=None,
-                    help="policy opponents take the argmax instead of sampling")
+                    help="policy opponents play the card-first greedy rule (SPEC §19.11) instead of sampling")
+    ap.add_argument("--init-from", metavar="CKPT", help="new run only: start from these weights (a model / snapshot "
+                                                         ".pt, 'ckpt:<path>' or a run directory); the architecture "
+                                                         "must match")
+    ap.add_argument("--shaping-anneal-frac", type=float, help="anneal the reward shaping weights to 0 over this "
+                                                              "fraction of --total-timesteps (default 0 = constant)")
+    ap.add_argument("--early-stop-score", type=float, help="finish at a snapshot epoch once the learner's score over "
+                                                           "its last --early-stop-window matches vs every anchor is "
+                                                           ">= this (default: off)")
+    ap.add_argument("--early-stop-window", type=int, help="matches per anchor for --early-stop-score (default 2000)")
     ap.add_argument("--print-interval", type=int, help="print a progress line every N epochs (default 1)")
     ap.add_argument("--dashboard", action="store_true", help="show PuffeRL's dashboard instead of progress lines")
     ap.add_argument("--summary-json", help="also write the final JSON summary here")
@@ -180,12 +227,115 @@ def build_config(a, ini, run_dir):
     return tr
 
 
-def env_kwargs(a, ini):
+def env_kwargs(a, ini, global_step=0):
+    """Royale keywords of a league run: royale.ini [env] (+ --env.* overrides), the decks, and the
+    reward-v2 plumbing of SPEC §19.7.1 (reward_gamma = train.gamma; the shaping anneal over
+    ceil(F * total / num_envs) env steps, offset by global_step // num_envs on resume)."""
+    from pufferroyale.trainer import shaping_env_kwargs
     kw = {k: v for k, v in ini["env"].items() if k not in ("num_envs", "num_agents", "opponent", "learner_side")}
     kw["deck0"], kw["deck1"] = deck_value(a["deck0"]), deck_value(a["deck1"])
     if a["frame_skip"]:
         kw["frame_skip"] = int(a["frame_skip"])
+    kw.update(shaping_env_kwargs(ini["train"]["gamma"], a["shaping_anneal_frac"] or 0.0, a["total_timesteps"],
+                                 a["num_envs"], global_step, anneal_steps=a.get("shaping_anneal_steps")))
     return kw
+
+
+def fix_anneal_steps(a, known, saved_args=None):
+    """SPEC §19.10.1: the run's anneal length N = ceil(F * total / num_envs) (exact), computed when the
+    run is created and stored in its args; a --resume keeps it (also when --total-timesteps grows) unless
+    --shaping-anneal-frac is given again, which recomputes it from the new F and the new total. A run
+    saved before N was recorded keeps the N its last invocation used (its saved F and total)."""
+    from pufferroyale.trainer import shaping_anneal_steps
+    if saved_args is None or known.shaping_anneal_frac is not None:
+        a["shaping_anneal_steps"] = shaping_anneal_steps(a["shaping_anneal_frac"] or 0.0, a["total_timesteps"],
+                                                         a["num_envs"])
+    elif saved_args.get("shaping_anneal_steps") is None:
+        a["shaping_anneal_steps"] = shaping_anneal_steps(saved_args.get("shaping_anneal_frac") or 0.0,
+                                                         saved_args["total_timesteps"], saved_args["num_envs"])
+    else:
+        a["shaping_anneal_steps"] = int(saved_args["shaping_anneal_steps"])
+
+
+def truncate_history(path, epoch):
+    """SPEC §19.10.3: keep the history.jsonl records with epoch <= `epoch` (the saved epoch a --resume
+    continues from; later records belong to epochs the run re-does). A torn last line is dropped too.
+    Returns the number of records removed."""
+    if not os.path.isfile(path):
+        return 0
+    keep, dropped = [], 0
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                ok = int(json.loads(line)["epoch"]) <= int(epoch)
+            except (ValueError, KeyError, TypeError):
+                ok = False
+            if ok:
+                keep.append(line if line.endswith("\n") else line + "\n")
+            else:
+                dropped += 1
+    if dropped:
+        with open(path + ".tmp", "w") as f:
+            f.writelines(keep)
+        os.replace(path + ".tmp", path)
+    return dropped
+
+
+def rotate_stale_history(path):
+    """SPEC §19.10.3: a NEW run in a directory that holds a history.jsonl (but no league_state.json)
+    moves it to history.jsonl.stale-<k>, k = 1, 2, ... (the first free). Returns the new path or None."""
+    if not os.path.isfile(path):
+        return None
+    k = 1
+    while os.path.exists(f"{path}.stale-{k}"):
+        k += 1
+    os.replace(path, f"{path}.stale-{k}")
+    return f"{path}.stale-{k}"
+
+
+def strip_logging_flags(tokens):
+    """`tokens` without PufferLib's logging flags (and their values)."""
+    out, skip = [], 0
+    for t in tokens:
+        if skip:
+            skip -= 1
+            continue
+        name = str(t).split("=", 1)[0]
+        if name in LOGGING_FLAGS:
+            skip = 0 if "=" in str(t) else LOGGING_FLAGS[name]
+            continue
+        out.append(t)
+    return out
+
+
+def make_wandb(ini, config, load_id=None):
+    """pufferroyale.trainer.WandbLogger (PufferLib's WandbLogger interface, any wandb version) when
+    --wandb was given (SPEC §19.7.5), else None (wandb not imported)."""
+    if ini.get("neptune"):
+        raise SystemExit("--neptune is not supported by the PufferRoyale scripts: use --wandb")
+    if not ini.get("wandb"):
+        return None
+    from pufferroyale.trainer import WandbLogger
+    args = {"wandb_project": ini.get("wandb_project"), "wandb_group": ini.get("wandb_group"), "tag": ini.get("tag"),
+            "no_model_upload": bool(ini.get("no_model_upload")), **json_safe(config)}
+    return WandbLogger(args, load_id=load_id)
+
+
+def wandb_record(rec, puffer_logs=None):
+    """One flat numeric dict for wandb from a history.jsonl record (+ PuffeRL's environment/* stats)."""
+    out = {"epoch": rec["epoch"], "global_step": rec["global_step"], "sps": rec["sps"], "pool_size": rec["pool_size"]}
+    for k, v in rec["losses"].items():
+        if v is not None:
+            out[f"losses/{k}"] = v
+    for spec, r in rec["results"].items():
+        out[f"results/{short(spec)}/score"] = r["score"]
+        out[f"results/{short(spec)}/games"] = r["games"]
+    for k, v in (puffer_logs or {}).items():
+        if k.startswith("environment/") and isinstance(v, (int, float)) and math.isfinite(float(v)):
+            out[k] = float(v)
+    return out
 
 
 # ------------------------------------------------------------------------------------ build
@@ -202,9 +352,12 @@ class RunLogger:
         pass
 
 
-def build(a, ini, pool, run_dir, run_id, dashboard=False, reset_seed=None, env_overrides=None):
+def build(a, ini, pool, run_dir, run_id, dashboard=False, reset_seed=None, env_overrides=None, global_step=0,
+          policy_kwargs=None, rnn_kwargs=None):
     """(LeagueVecEnv, policy, trainer, cfg) for resolved args `a`. The trainer is always MMDPuffeRL
-    (with mmd_coef = 0 it is plain PuffeRL PPO, bit for bit, plus the SPEC §18.6 AMP fix)."""
+    (with mmd_coef = 0 it is plain PuffeRL PPO, bit for bit, plus the SPEC §18.6 AMP fix).
+    policy_kwargs / rnn_kwargs replace royale.ini's [policy] / --rnn + [rnn] (best_response.py
+    --init-from-target builds the target's architecture)."""
     import torch
     from pufferroyale.league import LeagueVecEnv
     from pufferroyale.torch import Policy, Recurrent
@@ -213,13 +366,15 @@ def build(a, ini, pool, run_dir, run_id, dashboard=False, reset_seed=None, env_o
     cfg = build_config(a, ini, run_dir)
     if reset_seed is not None:
         cfg["seed"] = int(reset_seed)        # the vecenv's async_reset seed
-    kw = env_kwargs(a, ini)
+    kw = env_kwargs(a, ini, global_step)
     kw.update(env_overrides or {})
     lv = LeagueVecEnv(pool, num_envs=int(a["num_envs"]), seed=int(a["seed"]), device=a["device"],
                       opponent_greedy=bool(a["opponent_greedy"]), **kw)
     try:
-        policy = Policy(lv.driver_env, **ini["policy"])
-        if a["rnn"]:
+        policy = Policy(lv.driver_env, **(ini["policy"] if policy_kwargs is None else policy_kwargs))
+        if policy_kwargs is not None and rnn_kwargs is not None:
+            policy = Recurrent(lv.driver_env, policy, **rnn_kwargs)
+        elif policy_kwargs is None and a["rnn"]:
             policy = Recurrent(lv.driver_env, policy, **ini["rnn"])
         policy = policy.to(a["device"])
         lv.set_policy(policy)
@@ -292,6 +447,10 @@ class LeagueRun:
         self.lv = None
         self.notes = []
         self.nonfinite, self.bad_params = [], []
+        self.wandb = None
+        self.early_stopped = False
+        if known.resume and known.init_from:
+            raise SystemExit("--init-from starts a NEW run (weights only); it cannot be combined with --resume")
         if known.resume:
             self.run_dir = os.path.abspath(known.resume)
             state_path = os.path.join(self.run_dir, "league_state.json")
@@ -311,47 +470,131 @@ class LeagueRun:
                 raise SystemExit(f"{self.run_dir} already holds a run: use --resume or another --run-id")
         a["run_id"] = self.run_id
         a["anchors"] = ",".join(parse_anchors(a["anchors"]))
+        fix_anneal_steps(a, known, self.saved["args"] if self.saved else None)
         self.a = a
         self.epoch0 = int(self.saved["epoch"]) if self.saved else 0
         self.step0 = int(self.saved["global_step"]) if self.saved else 0
-        # --section.key overrides of the original run are kept; new ones given now win (argparse: last wins)
-        self.ini_overrides = list(self.saved.get("ini_overrides", [])) if self.saved else []
-        self.ini_overrides += list(rest)
-        self.ini = load_ini(self.ini_overrides)
+        # --section.key overrides of the original run are kept; new ones given now win (argparse: last wins).
+        # Logging flags (--wandb ...) apply to this invocation only and are not stored
+        saved_overrides = list(self.saved.get("ini_overrides", [])) if self.saved else []
+        self.ini_overrides = saved_overrides + strip_logging_flags(rest)
+        self.ini = load_ini(saved_overrides + list(rest))
+        if self.ini.get("neptune"):
+            raise SystemExit("--neptune is not supported by the PufferRoyale scripts: use --wandb")
+        self._check_early_stop_args(a)
         self.pool = OpponentPool(anchors=parse_anchors(a["anchors"]), max_snapshots=int(a["max_snapshots"]),
                                  pfsp=a["pfsp"], pfsp_eps=float(a["pfsp_eps"]), self_play_frac=float(a["self_play_frac"]),
                                  anchor_frac=float(a["anchor_frac"]), seed=int(a["seed"]))
         if self.saved:
             self.pool.load_state_dict(absolute_pool_state(self.saved["pool"], self.run_dir))
-        self.done_already = self.step0 >= int(a["total_timesteps"])
+        # per-anchor results of the last early_stop_window matches (persisted, so a resume keeps them)
+        es = (self.saved or {}).get("early_stop") or {}
+        win = int(a["early_stop_window"])
+        self.recent = {an: collections.deque((int(r) for r in (es.get("recent") or {}).get(an, [])), maxlen=win)
+                       for an in self.pool.anchors}
+        self.early_stopped = bool((self.saved or {}).get("early_stopped", False))
+        self.done_already = self.step0 >= int(a["total_timesteps"]) or self.early_stopped
+        # SPEC §19.10.3: history.jsonl matches the saved state -- a resume drops the records written after the
+        # last save (the run re-does those epochs); a new run moves a stale history (no league_state.json) aside
+        hist = os.path.join(self.run_dir, "history.jsonl")
+        if self.saved:
+            n = truncate_history(hist, self.epoch0)
+            if n:
+                self._note(f"history.jsonl: dropped {n} record(s) after the saved epoch {self.epoch0}")
         if self.done_already:
             return
         build_config(a, self.ini, self.run_dir)           # size / total checks before anything starts
         os.makedirs(self.run_dir, exist_ok=True)
+        if not self.saved:
+            moved = rotate_stale_history(hist)
+            if moved:
+                self._note(f"a stale history.jsonl (no league_state.json) was moved to {os.path.basename(moved)}")
         # a resumed run continues on fresh match seeds (seed + 7919 * epoch), still deterministic
         seed_now = int(a["seed"]) + 7919 * self.epoch0
         torch.manual_seed(seed_now)
         np.random.seed(seed_now % (2 ** 32))
         self.lv, self.policy, self.trainer, self.cfg = build(a, self.ini, self.pool, self.run_dir, self.run_id,
-                                                             dashboard=known.dashboard, reset_seed=seed_now)
+                                                             dashboard=known.dashboard, reset_seed=seed_now,
+                                                             global_step=self.step0)
         try:
+            from pufferroyale.trainer import warn_shaping_clip                  # SPEC §19.10.2
+            warn_shaping_clip(env_kwargs(a, self.ini, self.step0), self.cfg.get("reward_clip", 1.0), "league")
             self.snapshots = list(self.saved.get("snapshot_files", [])) if self.saved else []
             if self.saved:
                 self._restore()
+            elif a["init_from"]:
+                self._init_from(a["init_from"])
+            from pufferroyale.decks import expanded_deck_sets
+            from pufferroyale.league import policy_architecture
+            pkw, _ = policy_architecture(self.policy)
+            env_used = env_kwargs(a, self.ini, self.step0)
+            env_used.update(expanded_deck_sets(env_used))                # SPEC §19.10.5
+            self.config = {"policy": pkw, "rnn_name": "Recurrent" if a["rnn"] else None, "rnn": self.ini["rnn"],
+                           "env": env_used, "league": a}
             with open(os.path.join(self.run_dir, "config.json"), "w") as f:
-                json.dump({"policy": self.ini["policy"], "rnn_name": "Recurrent" if a["rnn"] else None,
-                           "rnn": self.ini["rnn"], "env": env_kwargs(a, self.ini), "league": a}, f, indent=2, default=str)
+                json.dump(self.config, f, indent=2, default=str)
+            self.wandb = make_wandb(self.ini, dict(self.config, train={k: v for k, v in self.cfg.items()
+                                                                       if isinstance(v, (int, float, str, bool))}),
+                                    load_id=(self.saved or {}).get("wandb_id"))
         except BaseException:
             self.abort()
             raise
 
+    def _check_early_stop_args(self, a):
+        if a["early_stop_window"] is None or int(a["early_stop_window"]) < 1:
+            raise SystemExit("--early-stop-window must be >= 1")
+        if a["early_stop_score"] is None:
+            return
+        if not math.isfinite(float(a["early_stop_score"])):
+            raise SystemExit("--early-stop-score must be a finite number")
+        if not parse_anchors(a["anchors"]):
+            raise SystemExit("--early-stop-score needs at least one anchor (it compares the learner against every anchor)")
+        if int(a["snapshot_interval"]) <= 0:
+            raise SystemExit("--early-stop-score is checked at snapshot epochs: it needs --snapshot-interval > 0")
+
+    def _init_from(self, ckpt):
+        """--init-from: the learner starts from the checkpoint's weights (new pool, new optimizer); an
+        architecture mismatch is an error. With MMD on, the reference is the loaded learner."""
+        from pufferroyale.league import load_weights
+        try:
+            path = load_weights(self.policy, ckpt)
+        except (ValueError, FileNotFoundError) as e:
+            raise SystemExit(f"--init-from: {e}")
+        self.a["init_from"] = os.path.abspath(path)
+        if self.trainer.ref_policy is not None:
+            self.trainer.refresh_reference()
+        self._note(f"learner initialised from {path} (weights only)")
+
+    def early_stop_reached(self) -> bool:
+        """SPEC §19.7.3: every anchor has >= N finished matches and the learner's score over its last N
+        matches vs every anchor is >= X."""
+        x = self.a["early_stop_score"]
+        if x is None or not self.recent:
+            return False
+        n = int(self.a["early_stop_window"])
+        for d in self.recent.values():
+            if len(d) < n or sum(0.5 * (r + 1) for r in d) / n < float(x):
+                return False
+        return True
+
     def _restore(self):
         """Load learner + optimizer + counters + RNG states of the saved run (SPEC §18.7)."""
         import torch
+        from pufferroyale.league import architecture_diff
         a, tr = self.a, self.trainer
         dev = a["device"]
-        self.policy.load_state_dict(torch.load(os.path.join(self.run_dir, "learner.pt"), map_location=dev,
-                                               weights_only=True))
+        sd = torch.load(os.path.join(self.run_dir, "learner.pt"), map_location=dev, weights_only=True)
+        # SPEC §19.10.8: another architecture / grid / rnn than the saved run is a clear exit, not a traceback
+        diff = architecture_diff(self.policy, sd)
+        try:
+            if not diff:
+                self.policy.load_state_dict(sd)
+        except RuntimeError as e:
+            diff = [str(e).strip().splitlines()[-1].strip()]
+        if diff:
+            raise SystemExit(f"--resume {self.run_dir}: this invocation builds a different policy than the saved run "
+                             f"({'; '.join(diff)}). The architecture, placement grid and rnn setting come from the run: "
+                             f"drop the overrides that change them (e.g. --env.placement-grid, --policy.*, --rnn.*)")
         ts = torch.load(os.path.join(self.run_dir, "trainer_state.pt"), map_location=dev, weights_only=False)
         # optimizer moments from the save; lr / betas / eps from THIS invocation's config; the cosine
         # schedule (with --anneal-lr) continued at the saved epoch
@@ -396,7 +639,13 @@ class LeagueRun:
                  "epoch": int(tr.epoch), "global_step": int(tr.global_step),
                  "pool": relative_pool_state(self.pool.state_dict(), self.run_dir),
                  "rng": {"league": self.lv.rng_state()}, "learner": "learner.pt",
-                 "snapshot_files": self.snapshots, "episodes": int(self.lv.episodes)}
+                 "snapshot_files": self.snapshots, "episodes": int(self.lv.episodes),
+                 "early_stop": {"recent": {an: list(d) for an, d in self.recent.items()}},
+                 "early_stopped": bool(self.early_stopped)}
+        if self.wandb is not None:
+            state["wandb_id"] = self.wandb.run_id
+        elif self.saved and self.saved.get("wandb_id"):
+            state["wandb_id"] = self.saved["wandb_id"]
         path = os.path.join(self.run_dir, "league_state.json")
         with open(path + ".tmp", "w") as f:
             json.dump(json_safe(state), f, indent=1, allow_nan=False)
@@ -435,32 +684,41 @@ class LeagueRun:
             if not self.known.dashboard:
                 tr.last_log_time = -1e18   # PuffeRL only publishes an epoch's losses when it logs (>= 0.25 s apart)
             tr.evaluate()
-            tr.train()
+            logs = tr.train()
             losses = {k: float(v) for k, v in tr.losses.items()}
             # SPEC §18.7: check BEFORE any snapshot / save
             self.nonfinite = [(int(tr.epoch), k, str(v)) for k, v in losses.items()
                               if k != "explained_variance" and not math.isfinite(v)]
             self.bad_params = [n for n, p in self.policy.named_parameters() if not torch.isfinite(p).all()]
-            window = collections.OrderedDict()
+            window, outcomes = collections.OrderedDict(), collections.OrderedDict()
             for spec, res, seat in self.lv.drain_results():
                 g = window.setdefault(spec, [0, 0.0])
                 g[0] += 1
                 g[1] += 0.5 * (res + 1)
+                outcomes.setdefault(spec, []).append(int(res))
+                if spec in self.recent:
+                    self.recent[spec].append(int(res))
             bad = bool(self.nonfinite or self.bad_params)
             snap = None
             if not bad and interval > 0 and tr.epoch % interval == 0:
                 snap = self.snapshot()
+                self.early_stopped = self.early_stop_reached()      # SPEC §19.7.3: checked at snapshot epochs
                 self.save()
                 self.last_saved_epoch = int(tr.epoch)
             sps = (tr.global_step - s_start) / max(time.time() - t_start, 1e-9)
             rec = {"epoch": int(tr.epoch), "global_step": int(tr.global_step), "sps": round(sps, 1),
                    "losses": {k: (v if math.isfinite(v) else None) for k, v in losses.items()},
                    "results": {s: {"games": g, "score": sc / g} for s, (g, sc) in window.items()},
+                   "outcomes": outcomes,
                    "pool_size": self.pool.pool_size(), "snapshot": os.path.basename(snap) if snap else None}
             if bad:
                 rec["nonfinite"] = True
+            if self.early_stopped:
+                rec["early_stopped"] = True
             with open(hist_path, "a") as f:
                 f.write(json.dumps(rec, allow_nan=False) + "\n")
+            if self.wandb is not None:                       # SPEC §19.9.12: one call per record
+                self.wandb.log(wandb_record(rec, logs), int(tr.global_step))
             if not self.known.dashboard and (tr.epoch % pi == 0 or snap or bad):
                 res = " ".join(f"{short(s)}={sc / g:.2f}/{g}" for s, (g, sc) in window.items()) or "-"
                 kl = f" kl {losses['mmd_kl']:.2e}" if "mmd_kl" in losses and float(a["mmd_coef"]) > 0 else ""
@@ -472,6 +730,11 @@ class LeagueRun:
             if bad:
                 self.diagnostic = self._write_diagnostic(losses)
                 break
+            if self.early_stopped:
+                print(f"[league] early stop at step {tr.global_step} (epoch {tr.epoch}): score >= "
+                      f"{float(a['early_stop_score']):g} over the last {int(a['early_stop_window'])} matches vs every "
+                      f"anchor", flush=True)
+                break
 
     def finish(self):
         """After a clean run: final save + model_<epoch>.pt, then release the trainer and envs."""
@@ -481,6 +744,9 @@ class LeagueRun:
             self.save()
             model = os.path.join(self.run_dir, f"model_{tr.epoch:06d}.pt")
             atomic_torch_save(cpu_state(self.policy), model)
+            if self.wandb is not None:
+                wb, self.wandb = self.wandb, None
+                wb.close(model, early_stop=bool(self.early_stopped))
         finally:
             self.abort()
         return model
@@ -491,6 +757,9 @@ class LeagueRun:
             self.trainer.utilization.stop()
         if self.lv is not None:
             self.lv.close()
+        if self.wandb is not None:
+            wb, self.wandb = self.wandb, None
+            wb.abort()                           # finish(exit_code=1); never raises
 
 
 def summary_of(run, model=None, extra=None):
@@ -501,6 +770,7 @@ def summary_of(run, model=None, extra=None):
            "elapsed_s": round(time.time() - run.t0, 2), "model": model,
            "pool": {short(k): round(v, 4) for k, v in pool.weights().items()},
            "stats": {short(k): v for k, v in pool.stats().items()}}
+    out["early_stopped"] = bool(run.early_stopped)
     if run.notes:
         out["notes"] = run.notes
     if extra:
@@ -513,7 +783,9 @@ def main():
     run = LeagueRun(known, rest)                 # aborts (threads stopped, envs closed) on any error
     status = 0
     if run.done_already:
-        print(f"[league] {run.run_dir} already reached {run.step0} >= --total-timesteps {run.a['total_timesteps']}: nothing to do")
+        why = ("early-stopped" if run.early_stopped else
+               f"already reached {run.step0} >= --total-timesteps {run.a['total_timesteps']}")
+        print(f"[league] {run.run_dir} {why}: nothing to do")
         summary = summary_of(run, extra={"nothing_to_do": True})
     else:
         print(f"[league] run dir {run.run_dir}  trainer {run.trainer.trainer_name}  "

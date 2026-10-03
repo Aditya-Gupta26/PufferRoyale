@@ -5,7 +5,7 @@ from envkit import (CARD_SLOTS, N_OWN, R, entity_rows, hand_of, id_vec, ids_to_c
                     next_of, scalar, tt_onehot)
 
 V3_FIELDS = E.SCALAR_FIELDS
-V3_TOTAL = E.SCALAR_TOTAL                                  # 298
+V3_TOTAL = E.SCALAR_TOTAL                                  # 306 since v0.5 §19.3 (298 in v0.3)
 TT_LEN = 4
 F_ID, F_X, F_Y, F_HPF, F_HP2K, F_FLY, F_DEPLOY, F_STUN, F_SLOW, F_BUILDING, F_TOB = range(11)
 

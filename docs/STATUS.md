@@ -1,7 +1,7 @@
 # PufferRoyale — status & handoff (2026-09-27)
 
-Everything below was built locally on the Mac during the handoff session. Nothing was pushed or
-committed, and no HPC was used. `docs/SPEC.md` (v0.4.2) is the binding contract.
+Everything below was built locally on the Mac during the handoff session and pushed as commit
+`b6b63da`; no HPC was used. **The training plan of record is `docs/TRAINING_PLAN.md` (2026-10-02).** `docs/SPEC.md` (v0.4.2) is the binding contract.
 `docs/DECISIONS.md` records every decision, and `docs/FIDELITY.md` lists every modelling choice and
 known divergence from the real game.
 
@@ -14,11 +14,11 @@ known divergence from the real game.
 | Engine | Header-only C99, integer-only, 20 Hz (details below) | `pufferroyale/csrc/` |
 | Bots | `noop`, `random` and `heuristic`. All seat-symmetric and legal-only | `pr_bots.h`, `pufferroyale.Bot`, `bot_action` |
 | PufferLib env | `pufferroyale.Royale(PufferEnv)` (details below) | `royale.h`, `binding.c`, `royale.py`, `config/royale.ini` |
-| Policy | CNN over board planes + pooled entity MLP + card-id embedding → masked joint logits + value; `Recurrent` (LSTM) | `pufferroyale/torch.py` |
-| Training | `train.py` (PuffeRL; `MMDPuffeRL` with coefficient 0 = plain PPO) | `scripts/`, `pufferroyale/trainer.py` |
+| Policy | CNN over board planes + pooled entity MLP + card-id embedding (+ fixed card-stat table) → value and a conditional head (card, then position given the card; SPEC §19.6) or the v0.4 flat head, masked joint logits on any placement grid; `Recurrent` (LSTM) | `pufferroyale/torch.py` |
+| Training | `train.py` (PuffeRL; `MMDPuffeRL` with coefficient 0 = plain PPO; reward clip and entropy split, `--resume` / `--init-from`, wandb), `stages.py` bot ladder, `plot_history.py` | `scripts/`, `pufferroyale/trainer.py` |
 | Game-theory tooling | League with PFSP opponent pool (frozen checkpoints, scripted anchors, self), MMD regulariser, best-response exploitability probe, tournament with Elo and meta-game Nash solver, deck meta-game | `pufferroyale/{league,trainer,metagame}.py`, `scripts/{league_train,best_response,tournament}.py` |
 | LLM play (your `ideas.txt`) | Text state renderer, action parser, `LLMAgent`, match harness, offline mocks, optional Anthropic adapter (off unless `--allow-network`) | `pufferroyale/llm.py`, `scripts/llm_match.py` |
-| Tools | Text and raylib viewer, benchmarks, eval, 16-step end-to-end ladder | `scripts/{watch,bench,eval,e2e_check}.py` |
+| Tools | Text and raylib viewer, benchmarks, eval (per deck, Wilson intervals), snapshot transitivity, 21-check end-to-end ladder | `scripts/{watch,bench,eval,transitivity,e2e_check}.py` |
 | HPC | Apptainer definition + SLURM scripts for NYU Torch. **Written but never run** | `hpc/` |
 
 **Engine details:**
@@ -37,8 +37,11 @@ known divergence from the real game.
 
 **Env details:**
 - 1 or 2 agents (self-play or vs bot).
-- Discrete(2305) own-frame actions; v0.3 observation of 17,707 floats with the exact legality mask.
-- Zero-sum reward with optional antisymmetric shaping; auto-reset; logs.
+- Discrete(2305) own-frame actions (or a coarse `placement_grid` of 2 / 4: Discrete(577) / Discrete(161),
+  SPEC §19.4); v0.5 observation of 17,715 floats (the v0.3 layout + the own deck, SPEC §19.3) with the
+  exact legality mask.
+- Zero-sum reward; optional potential-based shaping (reward v2, SPEC §19.1); deck sampling from pools /
+  random decks with held-out decks (SPEC §19.5); auto-reset; logs incl. per-card play rates.
 - About 26k steps/s per core.
 
 ## Cards (64) and presets
@@ -49,18 +52,35 @@ known divergence from the real game.
 - **Not yet:** Evolutions, Heroes, Champions, and the other roughly 60 cards (e.g. Electro Wizard, Mega Knight, Tornado, Graveyard, Executioner, Bowler, Hunter, Royal Ghost, Clone, Mirror, Rage). Most newer cards need the client's "action graph" logic, which has no public extractor.
 
 ## How it was verified
-The work used an orchestrator, three builder agents, an independent black-box **tester** (it never read the implementation), and **two independent code audits**. Every audit finding was fixed and got a regression test.
+**How the work was split:**
+- **Simulator (v0.1–v0.4):** an orchestrator, three builder agents, an independent black-box
+  **tester** (it never read the implementation) and **two independent code audits**.
+- **Training work package (v0.5, SPEC §19, 2026-10-02/03):** the same process, with builders for the
+  env side and for the policy/trainer/tools side, the same independent tester, and one more
+  independent audit (its findings became SPEC §19.10).
 
-Final independent run, on a clean rebuild:
+Every audit finding was fixed and got a regression test.
+
+Final independent run, on a clean rebuild (2026-10-03):
 
 | Check | Result |
 |---|---|
-| C unit/scenario tests (`make test-c`) | 16,651 checks, 0 failures, `-Wall -Wextra -Werror` (clang and gcc-15) |
+| C unit/scenario tests (`make test-c`) | 184,647 checks, 0 failures, warning-free (clang; v0.4 was also checked with gcc-15) |
 | AddressSanitizer + UBSan (`make asan`) | clean |
-| Python tests (`pytest tests`) | **1,425 passed** (1,169 tester spec tests + 256 builder tests, incl. the golden-hash determinism check) |
-| End-to-end ladder (`scripts/e2e_check.py`) | **16/16 PASS** |
+| Golden hashes (`scripts/golden_hashes.py`) | PASS: the engine is unchanged by v0.5 |
+| Tester spec tests (`pytest tests/spec`) | **1,455 passed** (incl. 286 for v0.5) |
+| Builder tests (`pytest tests/builder`) | **416 passed** |
+| End-to-end ladder (`scripts/e2e_check.py`) | **21/21 PASS** |
 
-The e2e ladder covers build, codegen, C tests, ASan, pytest, determinism, soak, mask, zero-sum, no-leak, auto-reset, perf, llm, train, eval and league.
+**What the e2e ladder covers:**
+- build, codegen, C tests, ASan, pytest;
+- determinism, soak, mask, zero-sum, no-leak, auto-reset;
+- the v0.5 checks: `reward_v2`, `policy_heads`, `decks`, `grid`, `ops`;
+- perf, llm, train, eval and league.
+
+**CPU learning check (v0.5, TRAINING_PLAN §7):** the default policy learned to beat the random bot
+(0.94 without shaping, 0.98 with shaping; 100 matches each) within about 0.6M learner steps on the
+Mac.
 
 Other checks:
 - **Mirror fuzz:** 1,000 bot-driven matches, each checked against its 180° seat-rotation, 1.15M ticks, **0 divergences**.
@@ -93,14 +113,15 @@ python scripts/llm_match.py --model mock_first_legal --opponent bot:heuristic --
 - **Training:** only local CPU smoke runs (100–150k steps) have been done. They prove the pipeline, not strength. The heuristic bot still beats every trained checkpoint.
 
 ## Suggested next steps
-1. **Review the autonomous decisions** in `docs/DECISIONS.md` (D1–D9, then D13+). Then commit: nothing is committed yet. The `.gitignore` already excludes `.venv/`, `third_party/`, `build/` and `experiments/`.
-2. **First HPC run:** hand `docs/HPC_HANDOFF.md` to the HPC agent. In short: build `hpc/pufferroyale.def` on Torch, then run `hpc/train.sbatch` → `hpc/league.sbatch` (fill in account and partition). Keep float32 unless you're testing bf16; the bf16 bug is fixed but only CPU-verified.
-3. **Course research questions** (PLAN D0): naive self-play vs PFSP league vs MMD, compared by exploitability using `best_response.py`; the empirical meta-game Nash over decks using `tournament.py` / `deck_metagame`.
+1. **Review the autonomous decisions** in `docs/DECISIONS.md` (D1–D9, then D13+).
+2. **Training:** follow `docs/TRAINING_PLAN.md`. The work package (reward v2, conditional policy head, card stats, own deck, deck sampling, `placement_grid`, operations) is built on the Mac first. In parallel, hand `docs/HPC_HANDOFF.md` to the HPC agent for cluster bring-up (isolated environment, G0, throughput), then stages 1, 3 and 4. Keep float32 unless you're testing bf16; the bf16 bug is fixed but only CPU-verified.
+3. **Course research questions:** self-play (A) vs PFSP league (B) vs league + MMD (C), from random init with no scripted bots in training, compared by exploitability (`best_response.py`); the deck meta-game Nash (`deck_metagame`). Details in TRAINING_PLAN §2 and §8.
 4. **Fidelity:** record a few real matches and measure the disputed facts (start elixir, lockout, tiebreak, speeds).
 5. **LLM matches:** `llm_match.py --model anthropic:claude-opus-5-5 --allow-network ...`. Check `cache_read_input_tokens` in the transcripts, because the rules prompt (~2.8k tokens) may be below some models' caching minimum.
 6. **More cards:** Evolutions, Heroes and Champions need their data decoded from a current APK (PLAN B3).
 
 ## Where things are
 - **Design and decisions:** `docs/PLAN.md`, `docs/SPEC.md`, `docs/DECISIONS.md`, `docs/FIDELITY.md`, `docs/STATUS.md` (this file).
+- **Training:** `docs/TRAINING_PLAN.md` (what and why), `docs/HPC_HANDOFF.md` (how, on the cluster).
 - **Tests:** `tests/spec/` (tester-owned), `tests/builder/`, `tests/c/`.
 - **Experiment outputs** (gitignored): `experiments/` — smoke runs, the league demo, LLM demos.

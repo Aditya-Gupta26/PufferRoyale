@@ -1017,7 +1017,357 @@ accident).
        JSON (no NaN/Infinity);
    (g) `Bot(kind, seed)` decisions depend only on `(kind, seed)` and the acting team's own-frame state.
 
+## 19. Training work package (v0.5 — Phase G, normative)
+
+Source and rationale: `docs/TRAINING_PLAN.md` §3–§7 (this section is the binding contract; the plan
+explains why). Engine game logic (`pufferroyale/csrc/pr_*.h` other than the observation encoder) is
+**unchanged**: the golden hash trails (`tests/golden/golden_hashes.json`) must pass unchanged.
+Everything marked [IMPL-DEFINED] is the builder's choice and must be deterministic and documented in
+`docs/FIDELITY.md` (env/obs items) or `docs/DECISIONS.md` (training/tools items).
+
+### 19.1 Reward v2 (C env, `royale.h`; `Royale` kwargs)
+- **New / changed kwargs** (all also accepted by `Royale(...)`; defaults reproduce v0.4 exactly):
+
+  | kwarg | meaning | default |
+  |---|---|---|
+  | `reward_tower` | `w_t` | 0.0 |
+  | `reward_crown` | `w_c` | 0.0 |
+  | `reward_elixir` | `w_e` (per elixir) | 0.0 |
+  | `reward_play` | `w_p` (per play; off by default) | 0.0 |
+  | `reward_elixir_cap` | `L_cap` (elixir) | 20.0 |
+  | `reward_play_cap` | `P_cap` (plays) | 20.0 |
+  | `reward_gamma` | `γ_r` | 1.0 |
+  | `shaping_anneal_steps` | `N` (env steps; 0 = constant weights) | 0 |
+  | `shaping_step_offset` | `n0` (env steps already done, for resume) | 0 |
+
+  Negative weights, caps ≤ 0, `γ_r ∉ (0, 1]`, `N < 0` or `n0 < 0` → `ValueError`.
+- **Quantities** for team `k` (enemy `j`) in state `s`:
+  `T_k = Σ_{i ∈ King, left, right} pr_obs_tower_frac(s, k, i)` (destroyed tower = 0);
+  `C_k` = crowns; `L_k` = cumulative leaked elixir = `leaked[k] / 2800`; `P_k` = `plays[k]`.
+- **Potential of team 0** (team 1's is its negation):
+  `Φ̂(s) = w_t·(T_0 − T_1) + w_c·(C_0 − C_1) − w_e·clip(L_0 − L_1, −L_cap, L_cap) + w_p·clip(P_0 − P_1, −P_cap, P_cap)`.
+- **Anneal multiplier** for an env's `n`-th `c_step` (n = 0, 1, … counted since the C env was
+  created; never reset by `c_reset`, `reset()` or episode ends): `m_n = max(0, 1 − (n0 + n)/N)` if
+  `N > 0`, else `m_n = 1`.
+- **Per `c_step`** (after the step's ticks):
+  1. `Φ_new = 0` if the match ended during this step, else `Φ_new = m_n · Φ̂(s')`.
+  2. `F = γ_r · Φ_new − Φ_prev`, where `Φ_prev` is the `Φ_new` stored by the previous `c_step` of
+     the **same match** (0 on a match's first step).
+  3. `r_0 = F + result_0 · [match ended]`, `r_1 = −r_0` (exact float negation). Rows get their
+     team's value as in v0.4. Then `Φ_prev ← Φ_new` (a new match starts with `Φ_prev = 0`).
+  4. `Φ̂`, `Φ_new` and `F` are computed in double precision; `r_0` is cast to float once.
+- **Properties (tested):** with all four weights 0 the rewards are bit-identical to v0.4 (terminal
+  ±1/0 only); self-play `r_0 + r_1 = 0` on every step; and for every finished match and team,
+  `Σ_t γ_r^t · F_t = 0` (|·| ≤ 1e-4, computed in float64 from the stored float32 rewards), so the
+  discounted shaped return equals `γ_r^{T−1} · result` — also while annealing (the stored previous
+  potential makes it exact). With nonzero weights this **replaces** the v0.4 shaping
+  (`reward_tower × Δ…` without γ and without the end-of-match refund).
+- `episode_return` / `learner_return` logs stay the per-episode sums of the rewards.
+
+### 19.2 Trainer (`pufferroyale/trainer.py`, `MMDPuffeRL`)
+1. **`reward_clip`** (config float, default 1.0): `MMDPuffeRL.evaluate()` is a statement-for-statement
+   copy of PufferLib 3.0 `PuffeRL.evaluate()` (commit `3b5c604`) except that rewards are clamped to
+   `[−c, c]` when `c > 0` and not clamped when `c ≤ 0`. With `c = 1` the stored rewards, actions,
+   RNG draws and buffers are identical to the base class.
+2. **Entropy decomposition.** For joint logits over `A = 1 + 4·B` actions (slot-major: action
+   `1 + s·B + j`), with `p = softmax(logits)`: `P(wait) = p_0`, `P(s) = Σ_j p_{1+s·B+j}`,
+   `H_card = −Σ_{c ∈ {wait,0,1,2,3}} P(c)·log P(c)`,
+   `H_pos = Σ_s P(s)·H(p(·|s))` with `p(j|s) = p_{1+s·B+j} / P(s)` (a slot with `P(s) = 0`
+   contributes 0; `0·log 0 = 0`). Identity: `H_joint = H_card + H_pos`. Every epoch logs
+   `losses/entropy_card` and `losses/entropy_pos` (minibatch means) next to `entropy`.
+3. **`ent_coef_card`, `ent_coef_pos`** (config floats, default −1.0 = unset). Both ≥ 0: the entropy
+   term of the loss is `−(ent_coef_card·mean(H_card) + ent_coef_pos·mean(H_pos))` instead of
+   `−ent_coef·mean(H_joint)`. Exactly one set → `ValueError` at construction. Both unset: `train()`
+   stays bit-identical to v0.4 (and to the base class when `mmd_coef = 0`); the extra logged
+   entropies are computed without gradients and consume no RNG. Both equal to `ent_coef`: the loss
+   equals the default loss within 1e-5 (relative) on the same batch.
+4. `obs_mask` / `masked_kl` use the action mask that matches the logits' width (§19.4).
+5. `royale.ini [train]` gains `reward_clip = 1.0`, `ent_coef_card = -1.0`, `ent_coef_pos = -1.0`.
+
+### 19.3 Own deck in the observation
+- New scalar field **`own_deck`**: the acting team's 8 deck cards as integer ids `card_id + 1`,
+  **ascending by card id** (the deck as a set; never the hand/queue order). Appended **after**
+  `enemy_tower_troop`: `SCALAR_SIZE` 298 → 306, `OBS_SIZE` 17,707 → 17,715, `MASK_OFFSET` + 8. All
+  existing fields keep their offsets. `SCALAR_INDEX["own_deck"] = (298, 8)`; `CARD_ID_SCALARS` gains
+  `"own_deck"`. C (`PR_OBS_*`), `binding.royale_layout()`, `Game.obs()` and the Python exports agree.
+- It depends only on the own deck; no-leak and seat-mirror properties continue to hold.
+
+### 19.4 Placement grid
+- `Royale(placement_grid=g)`, `g ∈ {1, 2, 4}` (default 1; else `ValueError`). Grid shape
+  `(rows, cols) = (ceil(32/g), ceil(18/g))`: g=1 → (32, 18), g=2 → (16, 9), g=4 → (8, 5);
+  `B = rows·cols` (576 / 144 / 40). Action space `Discrete(1 + 4·B)` = 2305 / 577 / 161.
+  `pufferroyale.royale` exports `grid_shape(g)` and `n_actions(g)`.
+- **Decoding** a coarse action `a ≥ 1`: `s = (a−1) // B`, `b = (a−1) % B`, `by = b // cols`,
+  `bx = b % cols`; block tiles `tx ∈ [x0, x1) = [g·bx, min(18, g·bx+g))`,
+  `ty ∈ [y0, y1) = [g·by, min(32, g·by+g))` (own frame). The **representative tile** is, among the
+  block's tiles legal for (team, slot) at that moment (exact fine mask), the one minimising
+  `(2·tx + 1 − (x0 + x1))² + (2·ty + 1 − (y0 + y1))²`, ties → smaller `ty`, then smaller `tx`. The
+  play is the fine action `1 + s·576 + ty·18 + tx`. No legal tile in the block → illegal (no-op,
+  counted in `illegal_actions`). `a = 0` is the no-op. With g = 1 the mapping is the identity.
+- **Observation unchanged:** the mask section stays the exact fine 2305-mask. The coarse mask is
+  derived: `coarse[0] = 1`; `coarse[1 + s·B + b] = max` of the fine mask over the block's tiles.
+  Exports: `pufferroyale.royale.action_mask(obs, grid=1)` (numpy, bool, `(..., 1 + 4B)`) and
+  `pufferroyale.torch.action_mask(observations, grid=1)` (torch). Every action the coarse mask
+  allows maps to a fine action the engine accepts (tested exhaustively on real states).
+- **Fine actions stay available where they were:** bots inside a single-agent env act in fine
+  actions; in `LeagueVecEnv` a `bot:` opponent's play is applied exactly as in v0.4 when g > 1
+  [IMPL-DEFINED mechanism, e.g. a per-row "fine actions" flag in the C env].
+- `Game.coarse_to_fine(team, action, grid) -> int` (fine action, 0 when the coarse action is a
+  no-op or illegal) uses the same C mapping.
+- `placement_grid` is a match setting of a checkpoint: it is recorded in `config.json`, added to
+  `league.MATCH_ENV_KEYS` and `eval.py`'s train-env keys, and every tool that runs a checkpoint
+  (`eval.py`, `best_response.py`, `tournament.py`, `metagame.play_match` / `deck_metagame`,
+  `watch.py`) plays that checkpoint's actions through its own grid.
+
+### 19.5 Deck sampling
+- **Env kwargs:** `deck_pool` (deck-set; default empty), `random_deck_frac` (float in [0, 1];
+  default 0), `heldout_decks` (deck-set; default empty), `deck_draw` (`"independent"` | `"mirror"`;
+  default `"independent"`).
+- **Deck-set** = a string or a Python list. String: items separated by `;` (whitespace ignored);
+  item = `PRESET` or `PRESET:WEIGHT` (a `DECKS` name other than `random`; weight > 0, default 1),
+  `random:N:SEED` (the `N` decks of `pufferroyale.decks.random_decks(N, SEED)`, weight 1 each), or
+  `file:PATH` (a JSON list whose elements are a preset name, a list of 8 card names/ids, or
+  `{"deck": <preset | list>, "weight": w}`). A Python list may hold the same element forms. Two
+  equal decks (as sets) in one deck-set → `ValueError`.
+- **New module `pufferroyale/decks.py`:** `parse_deck_set(spec) -> list[(deck, weight)]` (deck = a
+  tuple of 8 card ids, ascending); `random_decks(n, seed) -> list[deck]` (n distinct uniformly random
+  8-card decks of all `N_CARDS`, a pure function of `(n, seed)`); `deck_key(deck)` (canonical set key).
+- **Sampler** is active iff `deck_pool` is non-empty or `random_deck_frac > 0`; `deck0`/`deck1` are
+  then ignored (reported by `env_info`). Inactive → bit-identical to v0.4.
+- **At every deal** (construction, `reset`, auto-reset): team 0 then team 1 draws (with `"mirror"`,
+  team 1 takes team 0's deck): with probability `random_deck_frac` a uniformly random set of 8
+  distinct cards, **redrawn while it equals a held-out deck**; otherwise a pool deck with
+  probability ∝ weight. All draws use a dedicated PCG32 stream of the env (seeded from the env seed
+  like the bot and side streams; reseeded by `reset(seed)`); the game RNG stream is not used by the
+  sampler.
+- **Construction errors (`ValueError`):** a pool deck equal to a held-out deck; `random_deck_frac`
+  outside [0, 1]; `random_deck_frac < 1` with an empty pool; bad `deck_draw`; bad deck-set syntax.
+  Capacity ≥ 256 pool decks and ≥ 1024 held-out decks (tests must not assume more).
+- **Installed card order (ruling v0.5-G.1):** a pool item given as a preset name is installed in
+  that preset's card order, so a one-preset pool deals exactly like `deck0`/`deck1` = that preset
+  (same game-stream draws); every other deck (explicit lists, `random:N:SEED`, files, random draws)
+  is installed ascending by card id.
+- **`env_info` keys (ruling v0.5-G.1):** `deck_sampler`, `deck0_ignored`, `deck1_ignored` (booleans)
+  and `deck_mirror`; plus `placement_grid`, `row_grids`, `env_steps`, `shaping_multiplier`.
+- **Counts:** `Royale.deck_counts() -> {"pool": int64 array (len(pool),), "random": int,
+  "random_rejected": int}`, cumulative since construction and summed over the env's matches: +1 per
+  seat that receives pool deck i (a mirror deal counts both seats), +1 per seat with a random deck,
+  +1 per rejected random draw.
+- `royale.ini [env]` gains `deck_pool =` (empty), `random_deck_frac = 0.0`, `heldout_decks =`
+  (empty), `deck_draw = independent`, `placement_grid = 1`, `reward_elixir = 0.0`,
+  `reward_play = 0.0`, `reward_elixir_cap = 20.0`, `reward_play_cap = 20.0`.
+  (`reward_gamma` and the anneal keys are injected by the scripts, §19.7.)
+
+### 19.6 Policy (`pufferroyale/torch.py`)
+- `Policy(env, hidden_size=256, cnn_channels=64, entity_hidden=128, scalar_hidden=128, card_dim=16,
+  head="conditional", card_stats=1, pos_channels=32, placement_grid=None)`. The number of logits =
+  `env.single_action_space.n`; `placement_grid=None` derives g from it (2305 → 1, 577 → 2, 161 → 4).
+  `royale.ini [policy]` gains `head = conditional`, `card_stats = 1`, `pos_channels = 32`.
+- **Card encoding:** `enc(id) = [Embedding(CARD_SLOTS + 1, card_dim)(id), Linear(K, card_dim)(S[id])]`
+  with `card_stats` truthy, else the embedding alone; used for every card id in the observation
+  (entity rows, `hand`, `next_card`, `opp_last4`, `own_deck`).
+- **Card-stat table** `S`: `(CARD_SLOTS + 1) × K`, row `card_id + 1` (row 0 and unused rows = 0),
+  built from `binding.card_info` for the 64 cards, every column scaled into [0, 1] by its maximum
+  over the 64 cards (log1p first for HP/damage-like columns). Columns, in order:
+  elixir; is_troop; is_building; is_spell; units summoned (`count` + `count2`); hitpoints (log1p);
+  damage per hit (log1p; spells: their damage); hit_speed_ms; DPS (log1p of damage·1000/hit_speed);
+  range_milli; sight_range_milli; speed; flying (`flying_height > 0`); attacks_air; attacks_ground;
+  target_only_buildings; splash radius (millitiles: units max(area_damage_radius_milli,
+  projectile radius), spells radius); crown_tower_damage_percent; lifetime_ms; death_damage
+  (log1p); deploy_time_ms; jumps; charges (`charge_range > 0`); spawns units (`spawner` or
+  `death_spawn`). Missing / None → 0; booleans 0/1 [IMPL-DEFINED details documented].
+  Non-persistent buffer (not in the state dict). Exported:
+  `pufferroyale.torch.card_stat_table() -> (np.ndarray (CARD_SLOTS + 1, K), list[str] names)`.
+- **`head="flat"`:** the v0.4 head (`actor = Linear(hidden, A)`).
+- **`head="conditional"`:** (a) card logits — wait from the trunk vector `h`, slot `s` from an MLP of
+  `[h, enc(hand_s)]` (shared across slots); slot `s` masked iff its segment of the action mask has
+  no legal action; (b) a board feature map with `pos_channels` channels at 32 × 18 from the spatial
+  planes, conditioned per slot on `[h, enc(hand_s)]` (e.g. FiLM) and mapped by a 1×1 conv to a
+  32 × 18 logit map, average-pooled to the grid when g > 1 (partial blocks averaged over their
+  existing tiles) and flattened row-major (`by·cols + bx`; g = 1: `ty·18 + tx`), masked per slot;
+  (c) `joint[0] = log P(wait)`, `joint[1 + s·B + j] = log P(s) + log P(j | s)`; then illegal entries
+  = `finfo(dtype).min` (as v0.4). Final layers initialised with std 0.01. [IMPL-DEFINED: layer sizes]
+- **Exactness (tested, both heads where applicable):** softmax(joint) = `P(s)·P(j|s)` within 1e-5;
+  illegal logits exactly `finfo.min`, legal probabilities > 0; a row whose only legal action is
+  wait gives it probability 1 with finite entropy; no NaN/inf in logits, values, log-probs,
+  entropies, MMD KL or gradients; works for `Policy` and `Recurrent` (training forward on
+  `(segments, horizon, OBS)` and `forward_eval`) [IMPL-DEFINED how the decoder gets the board
+  features inside PufferLib's `LSTMWrapper`; no state may persist between calls].
+- **Checkpoints:** `league.policy_kwargs_from_state_dict` infers head, card_stats, pos_channels,
+  sizes and the grid, so `league.load_policy` loads every checkpoint the v0.5 tools write; older
+  checkpoints raise the clear `ValueError` (as v0.4 did for pre-v0.3 files).
+
+### 19.7 Scripts and tools
+1. **Reward plumbing.** `train.py`, `league_train.py` and `best_response.py` pass
+   `reward_gamma = train.gamma` to the env, and `--shaping-anneal-frac F` (default 0 = constant)
+   as `shaping_anneal_steps = ceil(F·total_timesteps / R)` with `R` = learner rows per vector step
+   (league / BR: `num_envs`; `train.py`: the vecenv's `num_agents`); on resume
+   `shaping_step_offset = global_step // R`. `F` is persisted with the run (league `args`).
+   `config.json` records the env kwargs actually used.
+2. **`train.py`:** `--resume RUN_DIR` (weights, optimizer, epoch, global step and torch RNG from the
+   run's latest save; `--total-timesteps` is the absolute target), `--init-from CKPT` (weights only;
+   new run), `--shaping-anneal-frac`, wandb (item 5).
+3. **`league_train.py`:** `--init-from CKPT` (new runs only — with `--resume` it is an error; weights
+   only; an architecture mismatch is an error), `--shaping-anneal-frac`,
+   `--early-stop-score X` with `--early-stop-window N` (default 2000): at each snapshot epoch, when
+   every anchor has ≥ N finished matches and the learner's score over its last N matches vs every
+   anchor is ≥ X, the run saves and finishes normally; the summary reports `"early_stopped": true`.
+4. **`scripts/stages.py`** (bot ladder): `--rungs "bot:noop:5000000:0.95;bot:random:50000000:0.90;bot:heuristic:300000000:0.55"`
+   (default as shown; anchor:budget:threshold), `--run-prefix P`, `--gate-window N` (default 2000),
+   other flags forwarded to every `league_train.py` rung. Rung i runs with `--anchors <anchor>
+   --self-play-frac 0 --anchor-frac 1.0 --early-stop-score <threshold>`, and `--init-from` rung
+   i−1's final model for i > 0. Gate = learner score vs the anchor over the last N matches (from
+   `history.jsonl`) ≥ threshold. Stops at the first failed gate; writes `<data-dir>/stages_<P>.json`
+   (per rung: run dir, steps, score, matches, passed) and exits non-zero if a gate failed.
+5. **wandb.** `train.py` and `league_train.py` honour PufferLib's existing `--wandb`,
+   `--wandb-project`, `--wandb-group` (and `--tag`) through `pufferlib.pufferl.WandbLogger` or an
+   equivalent; the league logs every `history.jsonl` record. `WANDB_MODE=offline` works without
+   network. Without `--wandb` nothing is imported or logged.
+6. **Per-card stats.** `Royale` (all policy rows: both rows in self-play, row 0 with a scripted
+   opponent) and `LeagueVecEnv` (learner rows only) count, per card c, `available_c` = decisions
+   where c is in hand, its slot's `affordable` flag is 1 and `lockout` is 0, and `played_c` =
+   decisions whose chosen action plays the slot holding c and is allowed by the action mask. Every
+   emitted log adds `cards/play_rate/<CARD_KEY> = played_c / available_c` for cards with
+   `available_c > 0`, and `cards/decisions`; counters reset after each emission.
+7. **Transitivity.** `pufferroyale.metagame.transitivity(P, margin=0.05) -> {"later_beats_earlier",
+   "pairs", "cyclic_triads", "triads"}` for agents in chronological order: `later_beats_earlier` =
+   fraction of pairs i < j with `P[j][i] > 0.5`; `cyclic_triads` = number of unordered triples that
+   form a directed 3-cycle with every edge's score > 0.5 + margin. `scripts/transitivity.py --run
+   RUN_DIR [--snapshots 10 --matches 100 --margin 0.05 --device --seed --out]` takes evenly spaced
+   `snap_*.pt` by epoch, plays a sampled round robin on the run's deck0 mirror and writes payoff,
+   Elo, Nash and the transitivity dict as strict JSON.
+8. **`eval.py`:** loads any checkpoint like `league.load_policy` (model / snapshot / run dir,
+   recurrent or not); takes results from match outcomes, never from reward signs; `--decks DECKSET`
+   evaluates each deck as a mirror (overrides `--deck0/--deck1`) and reports per deck and pooled;
+   every score gets a Wilson 95% interval (`ci95` in the JSON); honours `placement_grid`.
+9. **`best_response.py`:** `--init-from-target` (the learner starts from the target's weights; the
+   architecture and grid come from the target); `--shaping-anneal-frac`; env settings incl.
+   `placement_grid` from the target's `config.json`.
+10. **`scripts/plot_history.py RUN_DIR [--out PNG]`:** learner score per opponent and the losses vs
+    global step from `history.jsonl`; needs matplotlib (a clear error otherwise). matplotlib goes in
+    a `plots` extra of `setup.py`/`pyproject.toml`.
+11. **`hpc/pufferroyale.def`** installs `pytest`, `matplotlib` and `wandb` too.
+12. **`scripts/e2e_check.py`** gains checks `reward_v2` (zero-sum and the discounted-shaping
+    invariant on shaped bot matches), `policy_heads` (both heads, g ∈ {1, 2, 4}, factorisation and
+    masks on real observations), `decks` (sampling statistics, held-out never drawn), `grid` (every
+    coarse-legal action accepted) and `ops` (train.py resume, league `--init-from`, two tiny
+    `stages.py` rungs, eval.py on a recurrent snapshot).
+
+### 19.8 Unchanged guarantees
+- Golden hashes, determinism, seat symmetry, no-leak and zero-sum tests keep passing (updated only
+  where §19.3 changes the layout).
+- `MMDPuffeRL` with `mmd_coef = 0`, `reward_clip = 1` and the entropy split unset is PuffeRL's PPO
+  bit for bit.
+- With every new kwarg at its default, `Royale` behaves exactly as in v0.4 apart from the
+  `own_deck` field.
+
+### 19.9 Clarifications (v0.5-G.2, normative)
+1. **Empty pool:** the "`random_deck_frac < 1` with an empty pool" error applies only when the
+   sampler is active, i.e. `0 < random_deck_frac < 1` with an empty pool. A bad `deck_draw` is an
+   error even when the sampler is inactive. An 8-card list with repeated cards is a `ValueError`.
+   A Python deck-set list may also hold `PRESET:W` and `random:N:SEED` strings.
+2. **`env_info(i)`** describes C env `i`: `env_steps` = `c_step`s since that env was created;
+   `shaping_multiplier` = the multiplier the **next** step will use (`m_{env_steps}`); `row_grids` =
+   one entry per team, where a scripted-bot team (single-agent env) is always 1.
+3. **`Game.coarse_to_fine(team, a, 1)`** returns `a` if the engine would accept it, else 0.
+4. **Per-card logs:** `<CARD_KEY>` = `pufferroyale.CARD_KEYS[c]`; `cards/decisions` = the policy-row
+   decisions counted since the last emitted (non-empty) log.
+5. **Transitivity:** `pairs` = C(n, 2) and `triads` = C(n, 3) for n agents.
+6. **`eval.py` JSON:** every result row has `wins`, `draws`, `losses`, `score`
+   (= (wins + 0.5·draws) / n) and `ci95` = `[lo, hi]`, the Wilson 95% interval with p̂ = score and
+   n = wins + draws + losses; `--decks` adds `deck` to each row and a pooled row per opponent and
+   seat (`deck: "pooled"`).
+7. **Card-stat columns for spells:** the unit-only columns (units summoned, hitpoints, hit speed,
+   DPS, range, sight, speed, flying, attacks air/ground, buildings-only, lifetime, death damage,
+   deploy time, jumps, charges) are 0; a spell's damage column is its damage, its splash column its
+   `radius`, and "spawns units" is 1 iff it spawns units (`card_info["spawn"]` non-empty).
+8. **`policy_kwargs_from_state_dict(sd) -> (policy_kwargs, rnn_kwargs | None)`**, as in v0.4; the
+   policy kwargs include `head`, `card_stats`, `pos_channels` and `placement_grid`.
+9. **`config.json`** keeps its v0.4 top-level layout (`policy`, `rnn_name`, `rnn`, `env`, plus
+   `train` for `train.py` or `league` for `league_train.py`). `env` holds the env kwargs actually
+   used, including `reward_gamma`, `shaping_anneal_steps`, `shaping_step_offset` and
+   `placement_grid`. `train.py` records `shaping_anneal_frac` under `train` and reuses it on
+   `--resume` unless given again. `best_response.py --data-dir` writes a `config.json` of the same
+   layout next to `br.pt`.
+10. **`stages.py`:** `--gate-window N` is also passed to each rung as `--early-stop-window N`. A gate
+    with fewer than N finished matches vs its anchor **fails** (reported as insufficient matches).
+11. **Split entropy coefficients:** any negative value means unset.
+12. **wandb in the league:** one wandb log call per `history.jsonl` record (same step = global step).
+13. **`reward_gamma`** is not a CLI/ini key; the scripts always pass `train.gamma`. There is no
+    separate mismatch check.
+
+### 19.10 Audit amendments (v0.5-G.3, normative)
+1. **Anneal length is fixed per run.** The anneal length `N` (`shaping_anneal_steps`) is computed
+   once, when a run is created: `N = ceil(F·T/R)` in exact rational arithmetic on the decimal value of
+   `F` (no floating-point off-by-one). It is recorded with the run (league `args`; `train.py`'s
+   `config.json` `train` section) and reused on `--resume` even when `--total-timesteps` grows. It is
+   recomputed (from the new F and the new absolute total) only when `--shaping-anneal-frac` is given
+   again. The offset stays `global_step // R`.
+2. **Shaping vs the clamp.** When any shaping weight is > 0 and `reward_clip > 0`, `train.py`,
+   `league_train.py` and `best_response.py` print one warning to stderr (shaped terminal rewards may
+   be clipped; use `--train.reward-clip 0`). It is not an error.
+3. **League history after a preemption.**
+   - On `--resume`, `history.jsonl` is first cut back to the records with `epoch ≤` the saved epoch
+     (records written after the last save are dropped, since the run re-does those epochs).
+   - A **new** run started in a directory that holds a `history.jsonl` but no `league_state.json` moves
+     the old file aside (`history.jsonl.stale-<k>`, k = 1, 2, …) before writing.
+   - The early-stop window is persisted in `league_state.json` at every save, including the final one.
+4. **`stages.py` gate source.** The gate uses the persisted early-stop window of the rung's final
+   `league_state.json` (the learner's last ≤ N outcomes vs the anchor at the final save). Fewer than
+   N outcomes still fails. Rungs run in the caller's working directory, so relative paths in forwarded
+   flags are the caller's.
+5. **Deck sets in `config.json`.** Besides the spec strings, `config.json` `env` records the expanded
+   decks as `deck_pool_decks` and `heldout_decks_decks` (lists of `[cards, weight]`; pool cards in
+   installed order, held-out cards ascending since held-out decks are matched as sets), so a run's decks are reproducible even if a `file:` deck set changes later. Each deck
+   weight must be finite and ≤ 1e9 (else `ValueError`).
+6. **Mixed precision.** The conditional head computes the position pooling, masking and
+   log-softmax in float32 even under bf16 autocast: no NaN or inf in any intermediate
+   (`conditional_parts`), its outputs or gradients, for g ∈ {1, 2, 4}.
+7. **wandb.** Every logged record includes `global_step`, declared as the step metric (wandb
+   `define_metric`), so records re-done after a resume are kept rather than dropped.
+8. **Clean errors (ruling v0.5-G.4).**
+   - On `--resume` the run's architecture always wins, as in v0.4: `--rnn` and `--policy.*` /
+     `--rnn.*` given again are ignored, with one stderr note naming them (`league_train.py` keeps
+     `--policy.*` overrides as v0.4 did, so a changed policy size there fails the next item instead).
+   - A `--resume` whose effective setting would not fit the saved weights (e.g. a different
+     `placement_grid`, or a league `--policy.*` override that changes a size) exits with a clear
+     message (`SystemExit`), not a traceback.
+
+### 19.11 Sampling by default; card-first greedy (v0.5-G.5, normative)
+Rationale: the target is a Nash equilibrium of a hidden-information game, which is in general a
+**mixed** strategy, so a policy is evaluated by sampling from it. With the joint card × tile action,
+the plain argmax is also degenerate: probability is spread over many tiles, so "wait" is almost
+always the single most likely action even when the policy plays a card 95% of the time (measured:
+the CPU-learning-check policy won 40/40 sampled matches vs `bot:random` and 0/40 with the plain
+argmax, playing 9 cards in 2,400 greedy decisions).
+1. **Greedy = card first, then tile.** For joint logits over `A = 1 + 4·B` actions (slot-major), with
+   `p = softmax(logits)`, `P(wait) = p_0` and `P(s) = Σ_j p_{1+s·B+j}`:
+   - choose `c* = argmax` over (wait, slot 0, 1, 2, 3) of these marginals, ties → the earliest in
+     that order;
+   - wait → action 0; a slot → `1 + c*·B + argmax_j logits[1 + c*·B + j]`, ties → smallest `j`.
+
+   This is the single greedy rule everywhere: `pufferroyale.league.greedy_actions(logits) -> int32
+   array`, which `select_actions(logits, greedy=True, …)` uses (league `--opponent-greedy`,
+   `eval.py --greedy`, `best_response.py --greedy`, `tournament.py --greedy`, `watch.py --greedy`,
+   `metagame.play_match(greedy=True)`, `deck_metagame(greedy=True)`, LLM-match policy opponents).
+   An illegal action is never chosen.
+2. **Sampling is the default** for every tool that plays a policy:
+   - `watch.py` samples (new `--greedy` flag).
+   - `tournament.py` samples (new `--greedy` flag); `--sample` is still accepted and is a no-op.
+   - `metagame.play_match` and `deck_metagame` default to `greedy=False`.
+   - Policy opponents in the LLM match tools default to sampling.
+
+   Sampling stays seeded, so every tool is deterministic given its seed. This supersedes the
+   "greedy by default" choices of §15.7.14 and §15.7.10.
+3. JSON outputs that record the mode keep their `greedy` field (now `false` by default).
+
 ## Changelog
+- v0.5-G.5 (2026-10-03): §19.11 sampling by default everywhere; card-first greedy rule.
+- v0.5-G.4 (2026-10-03): §19.10.5 held-out order and §19.10.8 resume-architecture ruling.
+- v0.5-G.3 (2026-10-03): §19.10 audit amendments (fixed anneal length, clamp warning, preemption-safe league history and stages gate, recorded deck sets, fp32 position head under bf16, wandb step metric, clean resume errors).
+- v0.5-G.2 (2026-10-03): §19.9 clarifications (tester questions).
+- v0.5-G.1 (2026-10-03): §19.5 rulings (preset install order, capacity floor, env_info keys).
+- v0.5-G (2026-10-02): §19 training work package (reward v2, own-deck observation, placement grid, deck sampling, conditional policy head + card stats, trainer reward clip and entropy split, training operations).
 - v0.4.1 (2026-09-27): §18 second-audit amendments (tower tie by own-frame x, Chef serving order, dash invulnerability at damage time, symmetric bots, stronger snapshot validation, bf16/autocast rule, league robustness).
 - v0.4-F.1 (2026-09-27): §17.4 clarifications of the LLM interface (transcript/summary keys, clock, perspective).
 - v0.4-F (2026-09-26): §17 LLM play interface (text render/parse, LLMAgent, mocks, optional Anthropic adapter, llm_match script).
