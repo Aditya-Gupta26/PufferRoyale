@@ -523,6 +523,34 @@ static PyObject* vec_step(PyObject* self, PyObject* arg) {
     Py_RETURN_NONE;
 }
 
+/* DECISIONS D90 (SPS research, research/REPORT.md on branch sps-research): step envs [start, stop) of a vector with the GIL
+ * released, so that several Python threads can step disjoint slices at the same time. c_step only
+ * touches its own env (state, RNG streams, log) and that env's slice of the shared buffers, so any
+ * partition gives exactly the result of vec_step. */
+static PyObject* vec_step_range(PyObject* self, PyObject* args) {
+    if (PyTuple_Size(args) != 3) {
+        PyErr_SetString(PyExc_TypeError, "vec_step_range(vec, start, stop) requires 3 arguments");
+        return NULL;
+    }
+    VecEnv* vec = unpack_vecenv(args);
+    if (!vec) {
+        return NULL;
+    }
+    long start = PyLong_AsLong(PyTuple_GetItem(args, 1));
+    long stop = PyLong_AsLong(PyTuple_GetItem(args, 2));
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    if (start < 0) start = 0;
+    if (stop > vec->num_envs) stop = vec->num_envs;
+    Py_BEGIN_ALLOW_THREADS
+    for (long i = start; i < stop; i++) {
+        c_step(vec->envs[i]);
+    }
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
 static PyObject* vec_render(PyObject* self, PyObject* args) {
     int num_args = PyTuple_Size(args);
     if (num_args != 2) {
@@ -653,6 +681,7 @@ static PyMethodDef methods[] = {
     {"vec_init", (PyCFunction)vec_init, METH_VARARGS | METH_KEYWORDS, "Initialize a vector of environments"},
     {"vec_reset", vec_reset, METH_VARARGS, "Reset the vector of environments"},
     {"vec_step", vec_step, METH_VARARGS, "Step the vector of environments"},
+    {"vec_step_range", vec_step_range, METH_VARARGS, "Step envs [start, stop) with the GIL released (threaded stepping, D90)"},
     {"vec_log", vec_log, METH_VARARGS, "Log the vector of environments"},
     {"vec_render", vec_render, METH_VARARGS, "Render the vector of environments"},
     {"vec_close", vec_close, METH_VARARGS, "Close the vector of environments"},

@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use PufferRoyale (the simulator, the training code or the released model), please cite it as below."
+title: "PufferRoyale: a deterministic 1v1 Clash Royale-style battle simulator and league self-play agents"
+authors:
+  - family-names: Gupta
+    given-names: Aditya
+repository-code: "https://github.com/Aditya-Gupta26/PufferRoyale"
+url: "https://aditya-gupta26.github.io/pr-play/"
+license: MIT
+type: software
+keywords:
+  - reinforcement learning
+  - self-play
+  - league training
+  - exploitability
+  - PufferLib
+  - real-time strategy

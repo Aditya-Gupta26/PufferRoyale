@@ -42,6 +42,10 @@ v0.5 additions (SPEC §19.2):
 - ent_coef_card / ent_coef_pos (config, default -1.0 = unset): both >= 0 replace
   -ent_coef * mean(H_joint) by -(ent_coef_card * mean(H_card) + ent_coef_pos * mean(H_pos)); exactly
   one set is a ValueError. Unset, train() is exactly the v0.4 / base computation.
+- ent_coef_pos_unweighted (config, default 0 = off; 2026-10-20, the stage-4 placement-entropy ablation):
+  loss -= c * mean H_u, H_u = placement_entropy_unweighted (the tile-choice entropy H(p(. | s)) averaged over
+  the legal hand slots, not weighted by P(s)). Every epoch logs losses/entropy_pos_unweighted (computed
+  without grad when c = 0, so the update is then exactly as before).
 - obs_mask / masked_kl use the mask of the logits' placement grid (SPEC §19.4).
 - WandbLogger: PufferLib's WandbLogger interface for --wandb in train.py / league_train.py, working
   with any wandb version (SPEC §19.7.5; PufferLib's own class needs wandb.util.generate_id).
@@ -114,6 +118,27 @@ def entropy_split(logits: torch.Tensor):
     p_slot = p_card[:, 1:]
     h_pos = torch.where(p_slot > 0, p_slot * h_slot, torch.zeros_like(p_slot)).sum(-1)
     return h_card, h_pos
+
+
+def placement_entropy_unweighted(logits: torch.Tensor, mask: torch.Tensor):
+    """(per-row H_u, per-row bool) for joint logits (..., 1 + 4 B) and their legality mask (same shape):
+    H_u = the mean over the row's legal hand slots s (a slot with at least one legal tile) of H(p(. | s)),
+    the entropy of the tile choice given the card, NOT weighted by P(s) (entropy_split's H_pos is), and the
+    bool marks rows with at least one legal slot (H_u = 0 elsewhere). p(. | s) is the softmax of the slot's
+    legal logits, which removes the card's log-probability (a constant within the slot), so the gradient
+    reaches only the tile choice. Differentiable and finite for masked logits. (2026-10-20, the
+    placement-entropy ablation; ent_coef_pos_unweighted.)"""
+    A = logits.shape[-1]
+    if (A - 1) % 4:
+        raise ValueError(f"placement_entropy_unweighted needs 1 + 4 B joint logits, got {A}")
+    B = (A - 1) // 4
+    x = logits.float().reshape(-1, A)[:, 1:].reshape(-1, 4, B)
+    legal = mask.reshape(-1, A)[:, 1:].reshape(-1, 4, B).bool()
+    lp = torch.log_softmax(torch.where(legal, x, torch.finfo(torch.float32).min), dim=-1)
+    h = -torch.where(legal, lp.exp() * lp, torch.zeros_like(lp)).sum(-1)             # (N, 4)
+    ok = legal.any(-1)
+    n = ok.sum(-1)
+    return torch.where(ok, h, torch.zeros_like(h)).sum(-1) / n.clamp(min=1), n > 0
 
 
 def _coef(config, key):
@@ -269,6 +294,11 @@ class MMDPuffeRL(pufferl.PuffeRL):
             raise ValueError("ent_coef_card and ent_coef_pos must be set together (both >= 0) or both left unset "
                              f"(negative): got {config.get('ent_coef_card', -1.0)!r} and {config.get('ent_coef_pos', -1.0)!r}")
         self.entropy_split = self.ent_coef_card is not None
+        # placement-entropy ablation (2026-10-20): - c * mean H_u (placement_entropy_unweighted); 0 = off
+        self.ent_coef_pos_unweighted = float(config.get("ent_coef_pos_unweighted", 0.0) or 0.0)
+        if not (math.isfinite(self.ent_coef_pos_unweighted) and self.ent_coef_pos_unweighted >= 0.0):
+            raise ValueError(f"ent_coef_pos_unweighted must be a finite number >= 0, got "
+                             f"{config.get('ent_coef_pos_unweighted')!r}")
         orig = pufferl.Utilization
         pufferl.Utilization = _DaemonUtilization          # the base constructor starts the monitor
         try:
@@ -525,6 +555,15 @@ class MMDPuffeRL(pufferl.PuffeRL):
                 else:
                     with torch.no_grad():
                         h_card, h_pos = entropy_split(logits.detach())
+                # PLACEMENT ENTROPY (1/2): unweighted H(p(. | s)) over legal slots; in the graph only when used
+                from .torch import grid_of_actions
+                pe_mask = obs_mask(mb_obs, grid_of_actions(logits.shape[-1]))
+                if self.ent_coef_pos_unweighted > 0:
+                    h_u, h_u_ok = placement_entropy_unweighted(logits, pe_mask)
+                else:
+                    with torch.no_grad():
+                        h_u, h_u_ok = placement_entropy_unweighted(logits.detach(), pe_mask)
+                h_u_mean = (h_u * h_u_ok).sum() / h_u_ok.sum().clamp(min=1)
 
                 profile('train_misc', epoch)
                 newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -561,6 +600,10 @@ class MMDPuffeRL(pufferl.PuffeRL):
                 else:
                     loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
 
+                # PLACEMENT ENTROPY (2/2): - ent_coef_pos_unweighted * mean H_u (off at 0: the loss is unchanged)
+                if self.ent_coef_pos_unweighted > 0:
+                    loss = loss - self.ent_coef_pos_unweighted * h_u_mean
+
                 # MMD (1/3): + mmd_coef * KL(pi_theta || pi_ref), differentiated through pi_theta only
                 if self.mmd_coef > 0:
                     mmd_kl = self._mmd_kl(mb_obs, logits)
@@ -577,6 +620,7 @@ class MMDPuffeRL(pufferl.PuffeRL):
             losses['entropy'] += entropy_loss.item() / self.total_minibatches
             losses['entropy_card'] += h_card.mean().item() / self.total_minibatches
             losses['entropy_pos'] += h_pos.mean().item() / self.total_minibatches
+            losses['entropy_pos_unweighted'] += h_u_mean.item() / self.total_minibatches
             losses['old_approx_kl'] += old_approx_kl.item() / self.total_minibatches
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches

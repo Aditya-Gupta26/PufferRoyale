@@ -1,6 +1,9 @@
 """Build the pufferroyale.binding extension (PufferLib 3.0 native env + debug API).
 
     python setup.py build_ext --inplace        # release (-O2)
+    PR_OPT_FLAGS="-O3 -march=x86-64-v3" python setup.py build_ext --inplace --force
+                                               # release with other optimisation flags (the HPC
+                                               # build, DECISIONS D90; x86-64-v3 = AVX2 / FMA CPUs)
     DEBUG=1 python setup.py build_ext --inplace --force   # -O0 -g + ASan/UBSan
     uv pip install -e .            (or pip install -e .)       engine + env API
     uv pip install -e '.[train]'   (or pip install -e '.[train]') + torch / PufferLib for training
@@ -44,7 +47,9 @@ if DEBUG:
     extra_link_args += ["-fsanitize=address,undefined"]
     define_macros += [("PR_DEBUG", "1")]
 else:
-    extra_compile_args += ["-O2"]
+    # PR_OPT_FLAGS replaces -O2 (opt-in; unset, the build is unchanged). The cluster uses
+    # "-O3 -march=x86-64-v3": golden hashes and the step digest are unchanged (D90)
+    extra_compile_args += os.environ.get("PR_OPT_FLAGS", "-O2").split()
 
 if RAYLIB:
     default = "raylib-5.5_macos" if sys.platform == "darwin" else "raylib-5.5_linux_amd64"

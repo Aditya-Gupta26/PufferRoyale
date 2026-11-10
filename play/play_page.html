@@ -1,0 +1,1507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>PufferRoyale: play the policy</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #182029; --panel2: #202a35; --line: #33404d; --text: #e6edf3; --muted: #8b98a5;
+    --me: #2f7cf6; --foe: #e5484d; --elixir: #b04de8; --ok: #2fb36b; --warn: #f5a524; --gold: #f2c94c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body.ingame { overflow: hidden; }
+  .screen { display: none; }
+  .screen.on { display: flex; }
+  button, select, input { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 10px; font: inherit; }
+  button { cursor: pointer; } button:hover:not(:disabled) { border-color: #5b6b7b; }
+  select { max-width: 100%; min-width: 0; text-overflow: ellipsis; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--me); border-color: var(--me); color: #fff; font-weight: 600; }
+  button.linkbtn { background: none; border: 0; padding: 0; color: var(--me); text-decoration: underline; font-size: inherit; }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .emoji { font-family: "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif; }
+  .chip { background: var(--panel2); border-radius: 6px; padding: 1px 6px; font-size: 12px; white-space: nowrap; display: inline-block; }
+  footer { color: var(--muted); font-size: 11px; text-align: center; padding: 10px; }
+
+  /* ---------- lobby ---------- */
+  #lobby { flex-direction: column; max-width: 980px; margin: 0 auto; padding: 14px; gap: 14px; }
+  #lobby h1 { margin: 0; font-size: 22px; }
+  .card-panel { background: var(--panel); border-radius: 12px; padding: 14px; min-width: 0; overflow-x: auto; }
+  .card-panel h2 { margin: 0 0 10px; font-size: 16px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tabs button.on { background: #2b3948; border-color: #8aa; }
+  .presets { display: grid; gap: 6px; }
+  .preset { text-align: left; padding: 7px 10px; border-radius: 10px; }
+  .preset.on { border-color: var(--gold); background: #2b2f22; }
+  .preset .pc { font-size: 18px; letter-spacing: 1px; }
+  .builder { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; max-height: 360px; overflow-y: auto; padding: 2px; }
+  .bcard { background: var(--panel2); border: 2px solid transparent; border-radius: 9px; text-align: center; padding: 4px 2px 5px; cursor: pointer; position: relative; user-select: none; }
+  .bcard.on { border-color: var(--gold); background: #2b2f22; }
+  .bcard .ic { font-size: 24px; line-height: 30px; }
+  .bcard .nm { font-size: 11px; line-height: 1.15; height: 26px; overflow: hidden; }
+  .bcard .cost { position: absolute; top: 2px; left: 3px; background: var(--elixir); color: #fff; border-radius: 50%; width: 18px; height: 18px; font-size: 11px; font-weight: 700; line-height: 18px; }
+  .bcard .kd { position: absolute; top: 3px; right: 4px; font-size: 9px; color: var(--muted); text-transform: uppercase; }
+  #mydeck { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin: 8px 0; }
+  #mydeck .slot { background: var(--panel2); border: 1px dashed var(--line); border-radius: 8px; min-height: 52px; text-align: center; font-size: 10px; padding: 2px; }
+  #mydeck .slot .ic { font-size: 20px; line-height: 26px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #26313c; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; }
+  .res-w { color: #6fd39b; } .res-l { color: #ff8a8d; } .res-d { color: var(--muted); }
+  #err { color: #ff8a8d; min-height: 18px; }
+
+  /* ---------- queue ---------- */
+  #queue { flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; text-align: center; padding: 20px; }
+  #queue .big { font-size: 42px; font-weight: 800; }
+
+  /* ---------- game ---------- */
+  #game { height: 100%; max-width: 1180px; margin: 0 auto; padding: 6px 8px; gap: 8px; }
+  #gamecol { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-width: 0; max-width: 680px; }
+  #side { display: flex; flex-direction: column; gap: 8px; width: 330px; flex: 0 0 330px; min-height: 0; }
+  @media (max-width: 1000px) { #game { flex-direction: column; overflow-y: auto; height: auto; min-height: 100%; } #gamecol { max-width: none; height: 96vh; } #side { width: auto; flex: none; } }
+  .bar { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 10px; padding: 6px 10px; min-height: 40px; }
+  .bar .grow { flex: 1; min-width: 0; }
+  .who { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chips { display: flex; gap: 3px; flex-wrap: nowrap; overflow: hidden; }
+  .crowns { font-size: 18px; font-weight: 700; white-space: nowrap; }
+  .crowns.me { color: var(--me); } .crowns.foe { color: var(--foe); }
+  #boardwrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
+  canvas { touch-action: none; border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,.45); }
+  #clock { position: absolute; top: 8px; right: 10px; background: rgba(0,0,0,.55); padding: 3px 9px; border-radius: 8px; font-weight: 700; font-variant-numeric: tabular-nums; pointer-events: none; }
+  #banner { position: absolute; top: 44%; left: 50%; transform: translate(-50%,-50%); background: rgba(0,0,0,.6); padding: 8px 16px; border-radius: 10px; font-size: 18px; font-weight: 700; pointer-events: none; display: none; text-align: center; }
+  #toast { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: rgba(20,20,20,.92); padding: 6px 12px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; white-space: nowrap; }
+  #hand { display: grid; grid-template-columns: 0.75fr repeat(4, 1fr); gap: 6px; }
+  .card { background: var(--panel2); border: 2px solid transparent; border-radius: 10px; padding: 4px 2px 6px; text-align: center; cursor: pointer; user-select: none; position: relative; min-height: 74px; }
+  .card .ic { font-size: 28px; line-height: 34px; }
+  .card .nm { font-size: 11px; line-height: 1.15; height: 26px; overflow: hidden; }
+  .card .cost { position: absolute; top: 2px; left: 4px; background: var(--elixir); color: #fff; border-radius: 50%; width: 20px; height: 20px; font-size: 12px; font-weight: 700; line-height: 20px; }
+  .card .key { position: absolute; top: 2px; right: 6px; color: var(--muted); font-size: 11px; }
+  .card .adv { position: absolute; bottom: 2px; right: 4px; background: var(--gold); color: #222; border-radius: 6px; font-size: 10px; font-weight: 800; padding: 0 4px; }
+  .card.sel { border-color: #fff; background: #2b3948; }
+  .card { touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; }
+  .card > * { pointer-events: none; }
+  .card.sending { opacity: .5; border-style: dashed; border-color: #fff; }
+  .card.poor { opacity: .45; }
+  .card.next { cursor: default; background: transparent; border: 1px dashed #3a4654; min-height: 60px; }
+  .card.next .ic { font-size: 20px; line-height: 26px; }
+  #elixirbar { display: flex; align-items: center; gap: 8px; }
+  #elixirsegs { flex: 1; display: grid; grid-template-columns: repeat(10, 1fr); gap: 3px; height: 16px; }
+  .seg { background: #2a2f3a; border-radius: 3px; overflow: hidden; position: relative; }
+  .seg i { position: absolute; inset: 0; background: var(--elixir); transform-origin: left; }
+  #elixirnum { width: 52px; text-align: right; font-weight: 700; color: #d9a6f5; font-variant-numeric: tabular-nums; }
+  #rate { color: var(--warn); font-weight: 700; font-size: 12px; min-width: 22px; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
+  .toggles { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tg { display: flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 4px 10px 4px 6px; cursor: pointer; user-select: none; }
+  .tg .sw { width: 30px; height: 17px; border-radius: 9px; background: #3a4654; position: relative; transition: background .15s; flex: none; }
+  .tg .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #cfd6dd; transition: left .15s; }
+  .tg.on .sw { background: var(--ok); } .tg.on .sw::after { left: 15px; }
+  .tg.dis { opacity: .45; cursor: not-allowed; }
+  .panel { background: var(--panel); border-radius: 10px; padding: 8px 10px; }
+  .panel h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; }
+  .twrow { display: grid; grid-template-columns: 64px repeat(3, 1fr); gap: 6px; align-items: center; margin: 3px 0; font-size: 12px; }
+  .tw { background: #10161c; border-radius: 6px; padding: 3px 6px; line-height: 1.15; }
+  .tw .lb { color: var(--muted); font-size: 10px; display: flex; justify-content: space-between; }
+  .tw .n { font-weight: 800; font-variant-numeric: tabular-nums; }
+  .tw .b { height: 6px; background: #2a2f3a; border-radius: 3px; overflow: hidden; margin-top: 2px; }
+  .tw .b i { display: block; height: 100%; }
+  .tw.dead { opacity: .45; text-decoration: line-through; }
+  .assist { display: flex; align-items: center; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 2px 3px 2px 10px; }
+  .assist button { border: 0; border-radius: 14px; padding: 3px 10px; background: transparent; }
+  .assist button.on { background: var(--gold); color: #1d1d1d; font-weight: 700; }
+  #autopill { display: none; position: absolute; top: 48.4%; left: 50%; transform: translate(-50%, -50%); background: rgba(242,201,76,.95); color: #1d1d1d;
+    font-weight: 800; font-size: 12px; padding: 4px 12px; border-radius: 14px; z-index: 3; pointer-events: none; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+  #comments div { padding: 4px 0; border-bottom: 1px solid #26313c; font-size: 13px; }
+  #comments div:last-child { border-bottom: 0; }
+  #comments .t { color: var(--muted); font-size: 11px; margin-right: 6px; font-variant-numeric: tabular-nums; }
+  #wpnow { font-size: 22px; font-weight: 800; color: var(--gold); }
+  #feed { font-size: 12px; color: var(--muted); height: 16px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .me-t { color: #7fb0ff; } .foe-t { color: #ff8a8d; }
+  #replaybar input[type=range] { flex: 1; min-width: 80px; }
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 10; }
+  .modal .box { background: var(--panel); border-radius: 14px; padding: 16px 18px; width: min(420px, 92vw); text-align: center; }
+  .modal .big { font-size: 30px; font-weight: 800; margin: 4px 0 6px; }
+  .modal .row { justify-content: center; margin-top: 14px; }
+  @media (max-width: 480px) { .card .ic { font-size: 24px; line-height: 28px; } .card { min-height: 66px; } #game { padding: 4px; } }
+  /* ---------- phone: the board takes the screen; the controls live in a Menu sheet ---------- */
+  #hud, #hudcap { display: none; }
+  #sheet { position: fixed; inset: 0; z-index: 20; display: none; background: rgba(0,0,0,.5); }
+  #sheet .inner { position: absolute; left: 0; right: 0; bottom: 0; max-height: 85vh; max-height: 85dvh; overflow-y: auto; background: var(--bg);
+    border-radius: 16px 16px 0 0; padding: 8px 10px 20px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 -6px 24px rgba(0,0,0,.5); }
+  #sheet .grab { width: 44px; height: 5px; border-radius: 3px; background: #3a4654; margin: 2px auto 4px; }
+  #sheetbody { display: flex; flex-direction: column; gap: 8px; }
+  #sheetbody .bar { flex-wrap: wrap; }
+  #sheetbody #side { width: auto; flex: none; }
+  body.phone #game { height: 100vh; height: 100dvh; padding: 0; gap: 0; flex-direction: column; overflow: hidden; max-width: none; min-height: 0; }
+  body.phone #gamecol { height: 100%; max-width: none; gap: 4px; padding: 4px 4px 6px; }
+  body.phone #feed { display: none; }
+  body.phone #hud { display: flex; gap: 6px; align-items: center; flex: none; }
+  body.phone #hud #menubtn { margin-left: auto; }
+  body.phone #clock { display: none; }
+  #hudclock { font-variant-numeric: tabular-nums; }
+  #sheetbody #foecrowns { display: none; }
+  #sheetbody #topbar .grow { flex: 1 1 100%; }
+  .hudpill { background: var(--panel); border-radius: 14px; padding: 4px 10px; font-weight: 700; font-size: 14px; white-space: nowrap; }
+  #menubtn { border-radius: 14px; font-weight: 700; padding: 5px 14px; }
+  body.phone #hudcap { position: absolute; left: 8px; right: 8px; bottom: 8px; background: rgba(0,0,0,.72); border-radius: 10px; padding: 6px 10px; font-size: 13px; z-index: 3; pointer-events: none; }
+  body.phone .card { min-height: 58px; padding: 2px 1px 3px; border-radius: 9px; }
+  body.phone .card .ic { font-size: 22px; line-height: 26px; }
+  body.phone .card .nm { font-size: 10px; height: 22px; }
+  body.phone .card.next { min-height: 50px; }
+  body.phone #elixirbar { min-height: 30px; padding: 3px 8px; }
+  body.phone #hand { gap: 4px; }
+</style>
+</head>
+<body>
+
+<!-- ======================================================== lobby -->
+<div id="lobby" class="screen">
+  <div class="row" style="justify-content:space-between">
+    <div><h1>PufferRoyale · play the policy</h1>
+      <div class="muted small">Opponent: <span id="oplabel">…</span> · <span id="seats">…</span></div></div>
+    <div class="row"><span class="muted small" id="ownerbadge"></span></div>
+  </div>
+  <div class="grid2">
+    <div class="card-panel">
+      <h2>You</h2>
+      <div class="row"><input id="name" maxlength="24" placeholder="Your name" autocomplete="username" style="flex:1;min-width:0">
+        <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="PIN" autocomplete="current-password" style="width:72px">
+        <button id="savename">Continue</button></div>
+      <div class="small" id="whoami" style="margin-top:6px"></div>
+      <div class="muted small" style="margin-top:4px">Name + 4-digit PIN is your login. New name: choose a PIN. Same name and PIN on any device continue your record, deck and settings. <button id="changepin" class="linkbtn" style="display:none">Change my PIN</button></div>
+      <h2 style="margin-top:14px">Match</h2>
+      <div class="row" style="margin-bottom:6px"><label class="small">Opponent's deck</label><select id="oppdeck"></select></div>
+      <div class="row" style="margin-bottom:6px"><label class="small">Your seat</label><select id="seat">
+        <option value="0">team 0 (your plays resolve first on a shared tick)</option>
+        <option value="1">team 1 (the policy's plays resolve first)</option></select></div>
+      <div class="row"><label class="small">Speed</label><select id="speed"></select>
+        <span class="muted small">only 1× matches without assist are ranked</span></div>
+      <div class="row" style="margin-top:14px"><button class="primary" id="play" style="flex:1;padding:10px">Play</button></div>
+      <div id="err" class="small" style="margin-top:6px"></div>
+    </div>
+    <div class="card-panel">
+      <h2>Your deck <span class="muted small" id="deckavg"></span></h2>
+      <div class="tabs"><button id="tabpreset">Preset decks</button><button id="tabbuild">Build your own</button></div>
+      <div id="presetpane" class="presets"></div>
+      <div id="buildpane" style="display:none">
+        <div id="mydeck"></div>
+        <div class="row"><span class="muted small" id="buildinfo">Pick 8 different cards.</span>
+          <button id="clearbuild" style="margin-left:auto">Clear</button><button id="savebuild" class="primary">Use this deck</button></div>
+        <div class="builder" id="builder" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+  <div class="card-panel"><h2>Live now <span class="muted small">(watch any match as it is played, from the player's side)</span></h2>
+    <table><thead><tr><th>Player</th><th>Clock</th><th>Crowns (player – policy)</th><th class="num">Watching</th><th></th></tr></thead><tbody id="live"></tbody></table></div>
+  <div class="grid2">
+    <div class="card-panel"><h2>Leaderboard <span class="muted small">(ranked matches: score = wins + ½ draws per match)</span></h2>
+      <table><thead><tr><th>#</th><th>Player</th><th class="num">Matches</th><th class="num">W-D-L</th><th class="num">Score</th></tr></thead>
+        <tbody id="lb"></tbody></table>
+      <div class="muted small" id="lbtot" style="margin-top:6px"></div></div>
+    <div class="card-panel"><h2>Recent matches</h2>
+      <div class="tabs"><button id="tabrecent" class="on">Everyone</button><button id="tabmine">Mine</button></div>
+      <table><thead><tr><th>Player</th><th>Result</th><th>Decks</th><th></th></tr></thead><tbody id="recent"></tbody></table></div>
+  </div>
+  <footer>Unofficial research simulator; not affiliated with or endorsed by Supercell. Card names refer to the simulated mechanics only; no game art is used.</footer>
+</div>
+
+<!-- ======================================================== waiting line -->
+<div id="queue" class="screen">
+  <div class="muted">All seats are taken. You are number</div>
+  <div class="big" id="qpos">1</div>
+  <div class="muted" id="qinfo">in line</div>
+  <div class="muted small">Keep this page open: your match starts by itself.</div>
+  <button id="qleave">Leave the line</button>
+</div>
+
+<!-- ======================================================== game / replay -->
+<div id="game" class="screen">
+  <div id="gamecol">
+    <div class="bar" id="topbar">
+      <span class="crowns foe" id="foecrowns">0 👑</span>
+      <div class="grow"><div class="who" id="foename">opponent</div><div class="chips" id="foeseen"></div></div>
+      <span id="dot" title="connection"></span><span id="ping" class="small muted" title="time per update (round trip)"></span>
+      <button id="pausebtn" title="Pause / resume (Space)">Pause</button>
+      <select id="speedsel" title="Game speed"></select>
+      <button id="labelsbtn" title="Unit names on / off (L)">Aa</button>
+      <button id="leavebtn" title="Back to the lobby">Leave</button>
+    </div>
+    <div class="bar" id="replaybar" style="display:none">
+      <span class="chip" id="rpbadge">replay</span>
+      <input type="range" id="seek" min="0" max="6000" value="0">
+      <span class="small muted" id="rptime" style="font-variant-numeric:tabular-nums">0:00</span>
+      <button id="recbtn" title="Save this replay as a video (WebM)">⏺ Video</button>
+    </div>
+    <div class="toggles" id="toggles">
+      <div class="assist" id="assist" title="Hint: the policy's pick for you is marked on the board. Autopilot: the policy plays for you; any card you play comes first."><span class="small muted">Assist</span><button data-l="0">Off</button><button data-l="1">Hint</button><button data-l="2">Autopilot</button></div>
+      <div class="tg" id="tg-commentary"><div class="sw"></div>Claude commentary</div>
+      <div class="tg" id="tg-winprob"><div class="sw"></div>Claude win probability</div>
+      <div class="tg" id="tg-voice" title="Read Claude's commentary aloud"><div class="sw"></div>Voice</div>
+      <select id="voicesel" title="The commentator's voice" style="display:none">
+        <option value="am_fenrir">Fenrir (US)</option><option value="am_michael">Michael (US)</option><option value="am_puck">Puck (US)</option>
+        <option value="bm_george">George (UK)</option><option value="af_heart">Heart (US, female)</option></select>
+      <span class="chip" id="rankedchip"></span><span class="chip" id="watchers" style="display:none"></span>
+    </div>
+    <div id="hud"><span class="hudpill"><span class="foe-t" id="hudcrowns">0</span></span><span class="hudpill" id="hudclock">3:00</span><span class="hudpill small" id="hudwp" style="display:none"></span><button id="menubtn">Menu</button></div>
+    <div id="boardwrap">
+      <canvas id="cv"></canvas>
+      <div id="hudcap"></div>
+      <div id="autopill">AUTOPILOT is playing · tap a card to play yourself</div>
+      <div id="clock">3:00</div>
+      <div id="banner"></div>
+      <div id="toast"></div>
+    </div>
+    <div id="feed"></div>
+    <div class="bar" id="elixirbar">
+      <span class="crowns me" id="mecrowns">0 👑</span>
+      <div id="elixirsegs"></div>
+      <span id="rate"></span>
+      <span id="elixirnum">0.0</span>
+    </div>
+    <div id="hand"></div>
+  </div>
+  <div id="side">
+    <div class="panel" id="twpanel"><h3><span>🏰 Towers</span><span class="small" id="twcrowns"></span></h3><div id="twbody"></div></div>
+    <div class="panel" id="advpanel" style="display:none"><h3><span id="advtitle">Hint: the policy's pick for you</span></h3><div id="advbody" class="small"></div></div>
+    <div class="panel" id="wppanel" style="display:none"><h3><span>Claude · chance you win</span><span id="wpnow">–</span></h3>
+      <svg id="wpchart" viewBox="0 0 300 150" width="100%" style="display:block"></svg></div>
+    <div class="panel" id="cmpanel" style="display:none"><h3><span>🎙️ Claude commentary</span><span id="cmwait" class="small"></span></h3><div id="comments"></div></div>
+    <div class="panel small muted" id="sidenote">Tap a card, then a tile. Keys: 1–4 pick a card, Esc cancels, Space pauses, L names.</div>
+  </div>
+</div>
+
+<div id="sheet"><div class="inner"><div class="grab"></div>
+  <div class="row" style="justify-content:space-between"><b>Menu</b><button id="sheetclose">Close</button></div>
+  <div id="sheetbody"></div>
+</div></div>
+
+<div class="modal" id="pinmodal"><div class="box">
+  <div class="small muted" id="pintitle">Your name now has a PIN</div>
+  <div class="big" id="pinbig" style="letter-spacing:6px">0000</div>
+  <div class="small" id="pinnote">Write it down. With your name, it signs you in on any device. It is shown only this once.</div>
+  <div class="row"><button class="primary" id="pinok">I saved it</button></div>
+</div></div>
+
+<div class="modal" id="result"><div class="box">
+  <div class="big" id="rbig">Victory</div>
+  <div id="rsub"></div>
+  <div class="small muted" id="rnote" style="margin-top:6px"></div>
+  <div class="row"><button id="rwatch">Watch replay</button><button id="rlobby">Lobby</button><button class="primary" id="ragain">Play again</button></div>
+</div></div>
+
+<script>
+"use strict";
+// ======================================================================= connection
+const Q = new URLSearchParams(location.search);
+const TOKEN = Q.get("token") || "", OWNER = Q.get("owner") || "";
+const withTok = p => p + (p.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(TOKEN) + (OWNER ? "&owner=" + encodeURIComponent(OWNER) : "");
+async function post(p, body) {
+  const r = await fetch(withTok(p), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+  let d = {}; try { d = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+  return d;
+}
+async function getj(p) { const r = await fetch(withTok(p)); const d = await r.json(); if (!r.ok) throw new Error(d.error || r.status); return d; }
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+// ======================================================================= icons and names (generic emoji, no game art)
+const UNIT_ICON = {
+  Knight:"🛡️", Archer:"🧝", Musketeer:"🎯", Giant:"🗿", HogRider:"🐗", Minion:"😈", BabyDragon:"🐲",
+  Valkyrie:"🪓", Skeleton:"💀", IceGolemite:"⛄", IceSpirits:"💠", Prince:"🏇", Wizard:"🧙", Cannon:"⚙️",
+  Tesla:"⚡", Barbarian:"🧔", MiniPekka:"🤖", Pekka:"🦾", MegaMinion:"👹", Bat:"🦇", SpearGoblin:"🔱",
+  Goblin_Stab:"👺", Goblin:"👺", RoyalGiant:"🤴", Bomber:"💣", Princess:"👸", BlowdartGoblin:"🪃",
+  FireSpirits:"🔥", IceWizard:"🥶", Golem:"🪨", Golemite:"🪨", LavaHound:"🐕", LavaPups:"🌶️", Balloon:"🎈",
+  GiantSkeleton:"☠️", Witch:"🧙‍♀️", Tombstone:"🪦", InfernoTower:"🗼", InfernoDragon:"🐉", Assassin:"🥷",
+  BattleRam:"🐏", RoyalHog:"🐖", Miner:"⛏️", Mortar:"🧨", Xbow:"✖️", ElixirCollector:"⚗️", BombTower:"🏯",
+  RascalBoy:"👦", RascalGirl:"👧", AngryBarbarian:"😡", SkeletonDragon:"🦴", Wallbreaker:"💥", DarkWitch:"🧛",
+  KingTower:"👑", PrincessTower:"🏰", Cannoneer:"🏰", DaggerDuchess:"🏰", ChefTower:"🏰"
+};
+const SPELL_ICON = { "Fireball":"🔥", "Arrows":"🏹", "Zap":"✨", "The Log":"🪵", "Goblin Barrel":"🛢️", "Rocket":"🚀",
+  "Poison":"🧪", "Freeze":"❄️", "Earthquake":"🌋", "Lightning":"🌩️", "Giant Snowball":"☃️", "Barbarian Barrel":"🥁" };
+const PROJ_ICON = [["Fireball","🔥"],["Rocket","🚀"],["LogProjectile","🪵"],["BarbLog","🥁"],["Snowball","☃️"],
+  ["GoblinBarrel","🛢️"],["Lighning","🌩️"],["Lightning","🌩️"]];
+const UNIT_NAME = { Golemite:"Golemite", LavaPups:"Lava Pup", RascalGirl:"Rascal Girl", RascalBoy:"Rascal", Goblin:"Goblin",
+  Goblin_Stab:"Goblin", Barbarian:"Barbarian", Skeleton:"Skeleton", Bat:"Bat", Minion:"Minion", Archer:"Archer",
+  SpearGoblin:"Spear Goblin", RoyalHog:"Royal Hog", Wallbreaker:"Wall Breaker", AngryBarbarian:"Elite Barb",
+  IceGolemite:"Ice Golem", IceSpirits:"Ice Spirit", FireSpirits:"Fire Spirit", BlowdartGoblin:"Dart Goblin",
+  Assassin:"Bandit", DarkWitch:"Night Witch", Xbow:"X-Bow", KingTower:"King", PrincessTower:"Princess Tower",
+  SkeletonDragon:"Skeleton Dragon", MiniPekka:"Mini P.E.K.K.A", Pekka:"P.E.K.K.A", HogRider:"Hog Rider",
+  BabyDragon:"Baby Dragon", MegaMinion:"Mega Minion", RoyalGiant:"Royal Giant", GiantSkeleton:"Giant Skeleton",
+  InfernoTower:"Inferno Tower", InfernoDragon:"Inferno Dragon", BattleRam:"Battle Ram", IceWizard:"Ice Wizard",
+  LavaHound:"Lava Hound", ElixirCollector:"Elixir Collector", BombTower:"Bomb Tower" };
+const EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+
+let META = null, cardsById = [];
+// Colour emoji are drawn when the browser has a colour emoji font (phones, Mac, Windows); otherwise short name tags
+const EMOJI_OK = (function () {
+  try {
+    const c = document.createElement("canvas"); c.width = c.height = 28; const g = c.getContext("2d");
+    g.font = "22px " + EMOJI_FONT; g.textBaseline = "top"; g.fillText("🐗", 0, 0);
+    const d = g.getImageData(0, 0, 28, 28).data; let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 0 && (Math.abs(d[i] - d[i + 1]) > 25 || Math.abs(d[i + 1] - d[i + 2]) > 25)) n++;
+    return n > 10;
+  } catch (e) { return true; }
+})();
+const CROWN = EMOJI_OK ? " 👑" : " ♛";
+function abbr(name) {
+  const w = String(name).replace(/[^A-Za-z ]/g, " ").trim().split(/\s+/);
+  return w.length > 1 ? (w[0].charAt(0) + w[1].charAt(0)).toUpperCase() : w[0].slice(0, 2);
+}
+function cardIcon(c) {
+  const k = cardsById[c]; if (!k) return "?";
+  if (!EMOJI_OK) return abbr(k.name);
+  if (k.kind === "spell") return SPELL_ICON[k.name] || "✨";
+  return UNIT_ICON[k.unit] || "❔";
+}
+function unitIcon(unit, card) { if (!EMOJI_OK) return abbr(unitName(unit, card)); return UNIT_ICON[unit] || (card >= 0 ? cardIcon(card) : "❔"); }
+function unitName(unit, card) { return UNIT_NAME[unit] || (cardsById[card] ? cardsById[card].name : unit); }
+function swarm(card) { const k = cardsById[card]; return !!(k && k.count >= 3); }
+const $ = id => document.getElementById(id);
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function show(id) {
+  for (const s of document.querySelectorAll(".screen")) s.classList.remove("on");
+  $(id).classList.add("on");
+  document.body.classList.toggle("ingame", id === "game" || id === "queue");
+  if (id === "game") resize();
+}
+function fmtClock(tick) {
+  const reg = tick < META.regulation, left = Math.max(0, ((reg ? META.regulation : META.max_ticks) - tick) / META.tps);
+  const m = Math.floor(left / 60), s = Math.floor(left % 60);
+  return (reg ? "" : "OT ") + m + ":" + String(s).padStart(2, "0");
+}
+function fmtElapsed(tick) { const s = Math.floor(tick / META.tps); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+
+// ======================================================================= lobby
+let PID = null, PROFILE = {}, deckChoice = "hog26", building = [], recentMode = "all";
+async function boot() {
+  if (!TOKEN) { document.body.textContent = "Open this page with the link you were given (it ends in ?token=...)."; return; }
+  try { META = await getj("/api/meta"); } catch (e) { document.body.textContent = "Could not reach the game server (" + e.message + ")."; return; }
+  cardsById = []; for (const c of META.cards) cardsById[c.id] = c;
+  $("oplabel").textContent = META.label + (META.greedy ? " · greedy" : "");
+  $("ownerbadge").textContent = META.owner ? "owner session · Claude toggles " + (META.claude ? "available" : "not running") : "";
+  for (const v of META.speeds) { const o = el("option", "", v + "×"); o.value = v; $("speed").appendChild(o); }
+  $("speed").value = "1";                                         // real time (ranked) unless a player saved otherwise
+  const r = el("option", "", "random preset (each match)"); r.value = "random"; $("oppdeck").appendChild(r);
+  for (const d of Object.keys(META.decks)) { const o = el("option", "", d); o.value = d; $("oppdeck").appendChild(o); }
+  buildPresets(); buildBuilder();
+  const h = await post("/api/hello", {player_id: store("pr_player_id") || null});
+  if (h.player_id) { PID = h.player_id; PROFILE = h.profile || {}; $("name").value = PROFILE.name || ""; applyProfile(); showWho(h, false); showPin(h.new_pin); }
+  else { $("whoami").textContent = "Enter your name and PIN. New here? Pick a name and choose a 4-digit PIN."; $("whoami").className = "small muted"; }
+  setDeckTab(deckChoice === "custom" ? "build" : "preset");
+  renderDeck();
+  refreshBoard();
+  setInterval(() => { if ($("lobby").classList.contains("on")) refreshBoard(); }, 5000);
+  show("lobby");
+}
+function applyProfile() {                                    // a returning player's saved deck and settings
+  if (Array.isArray(PROFILE.deck) && PROFILE.deck.length === 8) { building = PROFILE.deck.slice(); deckChoice = "custom"; }
+  else if (PROFILE.deck && META.decks[PROFILE.deck]) deckChoice = PROFILE.deck;
+  if (PROFILE.opp_deck) $("oppdeck").value = PROFILE.opp_deck;
+  if (PROFILE.seat !== undefined) $("seat").value = String(PROFILE.seat);
+  if (PROFILE.speed) $("speed").value = String(PROFILE.speed);
+  setDeckTab(deckChoice === "custom" ? "build" : "preset");
+  renderDeck();
+}
+function showWho(h, fresh) {
+  const n = (h.history || []).length;
+  $("whoami").textContent = h.created ? "New player: " + PROFILE.name + ". Welcome!" :
+    (fresh ? "Welcome back, " : "Signed in as ") + PROFILE.name + " · " + n + (n === 1 ? " match" : " matches") + " played";
+  $("whoami").className = "small " + (h.created ? "res-w" : "me-t");
+  $("changepin").style.display = PID ? "" : "none";
+}
+function showPin(pin) {                                      // a PIN the server made for this player: shown once
+  if (!pin) return;
+  $("pinbig").textContent = pin;
+  $("pinmodal").style.display = "flex";
+}
+$("pinok").onclick = () => { $("pinmodal").style.display = "none"; };
+async function login(name) {                                  // name + PIN is the login (same name = same player)
+  const pin = $("pin").value.trim();
+  if (pin && !/^[0-9]{4}$/.test(pin)) throw new Error("A PIN is 4 digits.");
+  const h = await post("/api/hello", {player_id: store("pr_player_id") || null, name: name, pin: pin});
+  PID = h.player_id; store("pr_player_id", PID); PROFILE = h.profile || {};
+  $("name").value = PROFILE.name || name; $("pin").value = ""; $("err").textContent = "";
+  if (h.created) await saveProfile({deck: currentDeck(), opp_deck: $("oppdeck").value, seat: +$("seat").value, speed: +$("speed").value});
+  else applyProfile();
+  showWho(h, true);
+  showPin(h.new_pin);
+  refreshBoard();
+}
+$("changepin").onclick = async () => {
+  const p = (prompt("New 4-digit PIN for " + (PROFILE.name || "you") + ":") || "").trim();
+  if (!p) return;
+  if (!/^[0-9]{4}$/.test(p)) { flashErr("A PIN is 4 digits."); return; }
+  try { await post("/api/pin", {player_id: PID, pin: p}); flashErr("PIN changed. Use it with your name next time.", true); }
+  catch (e) { flashErr(e.message); }
+};
+function sameName(a, b) { return String(a || "").trim().replace(/\s+/g, " ").toLowerCase() === String(b || "").trim().replace(/\s+/g, " ").toLowerCase(); }
+function buildPresets() {
+  const pane = $("presetpane"); pane.innerHTML = "";
+  for (const d of Object.keys(META.decks)) {
+    const b = el("button", "preset"); b.dataset.deck = d;
+    const ids = META.decks[d], avg = ids.reduce((a, c) => a + cardsById[c].cost, 0) / 8;
+    b.appendChild(el("div", "", d + "  ·  avg " + avg.toFixed(1)));
+    b.appendChild(el("div", "pc emoji", ids.map(cardIcon).join(" ")));
+    b.appendChild(el("div", "small muted", ids.map(c => cardsById[c].name).join(", ")));
+    b.onclick = () => { deckChoice = d; renderDeck(); saveProfile({deck: d}); };
+    pane.appendChild(b);
+  }
+}
+function buildBuilder() {
+  const g = $("builder"); g.innerHTML = "";
+  const order = META.cards.slice().sort((a, b) => a.cost - b.cost || a.name.localeCompare(b.name));
+  for (const c of order) {
+    const d = el("div", "bcard"); d.dataset.card = c.id;
+    d.appendChild(el("span", "cost", String(c.cost))); d.appendChild(el("span", "kd", c.kind));
+    d.appendChild(el("div", "ic emoji", cardIcon(c.id))); d.appendChild(el("div", "nm", c.name));
+    d.onclick = () => {
+      const i = building.indexOf(c.id);
+      if (i >= 0) building.splice(i, 1); else if (building.length < 8) building.push(c.id); else { flashErr("A deck has 8 cards: remove one first."); return; }
+      renderDeck();
+    };
+    g.appendChild(d);
+  }
+}
+function setDeckTab(t) {
+  $("tabpreset").classList.toggle("on", t === "preset"); $("tabbuild").classList.toggle("on", t === "build");
+  $("presetpane").style.display = t === "preset" ? "" : "none"; $("buildpane").style.display = t === "build" ? "" : "none";
+}
+$("tabpreset").onclick = () => setDeckTab("preset");
+$("tabbuild").onclick = () => setDeckTab("build");
+$("clearbuild").onclick = () => { building = []; renderDeck(); };
+$("savebuild").onclick = async () => {
+  if (building.length !== 8) { flashErr("Pick exactly 8 cards."); return; }
+  deckChoice = "custom"; renderDeck(); await saveProfile({deck: building}); flashErr("Saved: your own deck is selected.", true);
+};
+function currentDeck() { return deckChoice === "custom" ? building.slice() : deckChoice; }
+function renderDeck() {
+  for (const b of document.querySelectorAll(".preset")) b.classList.toggle("on", deckChoice === b.dataset.deck);
+  for (const b of document.querySelectorAll(".bcard")) b.classList.toggle("on", building.indexOf(+b.dataset.card) >= 0);
+  const md = $("mydeck"); md.innerHTML = "";
+  for (let i = 0; i < 8; i++) {
+    const s = el("div", "slot"); const c = building[i];
+    if (c !== undefined) { s.appendChild(el("div", "ic emoji", cardIcon(c))); s.appendChild(el("div", "", cardsById[c].name)); s.title = "remove"; s.onclick = () => { building.splice(i, 1); renderDeck(); }; }
+    md.appendChild(s);
+  }
+  const ids = deckChoice === "custom" ? building : META.decks[deckChoice];
+  $("deckavg").textContent = ids && ids.length === 8 ? "· " + (deckChoice === "custom" ? "your own" : deckChoice) + ", avg elixir " + (ids.reduce((a, c) => a + cardsById[c].cost, 0) / 8).toFixed(1) : "";
+  $("buildinfo").textContent = building.length + " of 8 cards" + (deckChoice === "custom" ? " · in use" : "");
+}
+async function saveProfile(f) { if (!PID) return; try { const r = await post("/api/profile", Object.assign({player_id: PID}, f)); PROFILE = r.profile; } catch (e) { flashErr(e.message); } }
+function flashErr(msg, ok) { const e = $("err"); e.textContent = msg; e.style.color = ok ? "#6fd39b" : "#ff8a8d"; clearTimeout(flashErr.h); flashErr.h = setTimeout(() => e.textContent = "", 4000); }
+$("savename").onclick = async () => { const n = $("name").value.trim(); if (!n) { flashErr("Please enter a name."); return; } try { await login(n); } catch (e) { flashErr(e.message); } };
+$("name").addEventListener("keydown", ev => { if (ev.key === "Enter") $("savename").onclick(); });
+$("pin").addEventListener("keydown", ev => { if (ev.key === "Enter") $("savename").onclick(); });
+$("oppdeck").onchange = () => saveProfile({opp_deck: $("oppdeck").value});
+$("seat").onchange = () => saveProfile({seat: +$("seat").value});
+$("speed").onchange = () => saveProfile({speed: +$("speed").value});
+$("tabrecent").onclick = () => { recentMode = "all"; $("tabrecent").classList.add("on"); $("tabmine").classList.remove("on"); refreshBoard(); };
+$("tabmine").onclick = () => { recentMode = "mine"; $("tabmine").classList.add("on"); $("tabrecent").classList.remove("on"); refreshBoard(); };
+function resultCell(s) {
+  const td = el("td");
+  if (s.abandoned || s.result === null) { td.textContent = "left"; td.className = "res-d"; }
+  else { td.textContent = (s.result > 0 ? "won " : s.result < 0 ? "lost " : "draw ") + s.crowns[0] + "–" + s.crowns[1]; td.className = s.result > 0 ? "res-w" : s.result < 0 ? "res-l" : "res-d"; }
+  if (!s.ranked) td.appendChild(el("span", "muted small", s.autopilot_used ? " · autopilot" : s.advisor_used ? " · hint" : s.min_speed < 1 ? " · " + s.min_speed + "×" : ""));
+  return td;
+}
+async function refreshBoard() {
+  try {
+    const lb = await getj("/api/leaderboard");
+    $("seats").textContent = lb.status.playing + " of " + lb.status.max_players + " seats in use" + (lb.status.waiting ? ", " + lb.status.waiting + " waiting" : "");
+    const tb = $("lb"); tb.innerHTML = "";
+    lb.rows.forEach((r, i) => {
+      const tr = el("tr"); tr.appendChild(el("td", "", String(i + 1))); tr.appendChild(el("td", "", r.name));
+      tr.appendChild(el("td", "num", String(r.n))); tr.appendChild(el("td", "num", r.w + "-" + r.d + "-" + r.l));
+      tr.appendChild(el("td", "num", (100 * r.score).toFixed(0) + "%")); tb.appendChild(tr);
+    });
+    if (!lb.rows.length) { const tr = el("tr"); const td = el("td", "muted", "No ranked matches yet: be the first."); td.colSpan = 5; tr.appendChild(td); tb.appendChild(tr); }
+    const t = lb.totals;
+    $("lbtot").textContent = t.n ? "All ranked matches: humans " + t.w + " wins, " + t.d + " draws, " + t.l + " losses against the policy (" + (100 * (t.w + t.d / 2) / t.n).toFixed(0) + "%)." : "";
+    const lv = $("live"); lv.innerHTML = "";
+    for (const m of (lb.live || [])) {
+      const tr = el("tr"); tr.appendChild(el("td", "", m.name || "?"));
+      tr.appendChild(el("td", "", fmtClock(m.tick) + (m.paused ? " (paused)" : "") + (m.speed < 1 ? " · " + m.speed + "×" : "")));
+      tr.appendChild(el("td", "", m.crowns[0] + " – " + m.crowns[1]));
+      tr.appendChild(el("td", "num", String(m.spectators)));
+      const td = el("td"); const b = el("button", "primary", "Watch live"); b.onclick = () => spectate(m.match_id); td.appendChild(b); tr.appendChild(td);
+      lv.appendChild(tr);
+    }
+    if (!(lb.live || []).length) { const tr = el("tr"); const td = el("td", "muted", "No match is being played right now."); td.colSpan = 5; tr.appendChild(td); lv.appendChild(tr); }
+    const list = recentMode === "mine" ? (await getj("/api/history?player_id=" + encodeURIComponent(PID))).matches : lb.recent;
+    const rb = $("recent"); rb.innerHTML = "";
+    for (const s of list) {
+      const tr = el("tr"); tr.appendChild(el("td", "", s.name || "?")); tr.appendChild(resultCell(s));
+      tr.appendChild(el("td", "small muted", (s.decks.human || "") + " vs " + (s.decks.model || "")));
+      const td = el("td"); const b = el("button", "", "Watch"); b.onclick = () => watch(s.id); td.appendChild(b); tr.appendChild(td); rb.appendChild(tr);
+    }
+    if (!list.length) { const tr = el("tr"); const td = el("td", "muted", "No matches yet."); td.colSpan = 4; tr.appendChild(td); rb.appendChild(tr); }
+  } catch (e) { $("seats").textContent = "server unreachable"; }
+}
+$("play").onclick = async () => {
+  const name = $("name").value.trim();
+  if (!name) { flashErr("Please enter your name first."); $("name").focus(); return; }
+  try {
+    if (!PID || !sameName(name, PROFILE.name)) await login(name);     // sign in (or switch player) first
+    const deck = currentDeck();
+    if (Array.isArray(deck) && deck.length !== 8) { flashErr("Your own deck needs 8 cards (or pick a preset)."); return; }
+    const r = await post("/api/join", {player_id: PID, deck, opp_deck: $("oppdeck").value, seat: +$("seat").value, speed: +$("speed").value});
+    startSession(r.sid, "match");
+  } catch (e) { flashErr(e.message); }
+};
+async function spectate(mid) {
+  try { const r = await post("/api/spectate", {match_id: mid}); startSession(r.sid, "spectate"); }
+  catch (e) { flashErr(e.message); refreshBoard(); }
+}
+async function watch(mid) {
+  try { const r = await post("/api/watch", {player_id: PID, match_id: mid}); startSession(r.sid, "replay"); }
+  catch (e) { flashErr(e.message); }
+}
+
+// ======================================================================= session (queue -> match / replay)
+let SID = null, KIND = null, ES = null, pollTimer = null, S = null, chromeFor = null;
+function startSession(sid, kind) {
+  stopSession();
+  SID = sid; KIND = kind; S = null; chromeFor = null; resetBoard();
+  $("result").style.display = "none";
+  show(kind === "match" ? "queue" : "game");
+  $("qpos").textContent = "…"; $("qinfo").textContent = "in line";
+  connect();
+}
+function stopSession() {
+  SID = null;
+  $("sheet").style.display = "none";
+  if (WS) { const w = WS; WS = null; try { w.close(); } catch (e) {} }
+  for (const id of Array.from(acks.keys())) settle(id, {ok: false, reason: "left"});
+  if (ES) { ES.close(); ES = null; }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (recorder && recorder.state === "recording") recorder.stop();
+}
+// The live channel. First choice: a WebSocket (/api/ws). The server pushes every engine tick (20 a second) and
+// the page sends its plays on the same connection, so a play reaches the server in half a round trip. Fallback:
+// polling, one request at a time, each answered as soon as a newer frame exists (?after=<version>). Server-sent
+// events were dropped on 2026-11-06: Cloudflare's quick tunnel held that stream back for up to ~3 s. If the
+// WebSocket does not open within 4 s, sends no first frame within 3 s, or goes quiet for 1.5 s while the match
+// runs, the page polls instead (for the rest of the session).
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let rttEma = 0, WS = null, wsFails = 0, lastFrameAt = 0, wsStart = 0;
+const acks = new Map();                                    // play id -> {resolve, timer}
+function noteRtt(ms) {
+  rttEma = rttEma ? 0.8 * rttEma + 0.2 * ms : ms;
+  $("ping").textContent = Math.round(rttEma) + " ms" + (WS && WS.readyState === 1 ? "" : " (poll)");
+}
+function connect() { if (window.WebSocket && wsFails < 2) connectWS(); else connectPoll(); }
+function connectWS() {
+  const mySid = SID;
+  const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + withTok("/api/ws?sid=" + encodeURIComponent(mySid));
+  let ws, frames = 0;
+  try { ws = new WebSocket(url); } catch (e) { wsFails = 9; connectPoll(); return; }
+  WS = ws; wsStart = performance.now();
+  ws.onopen = () => { $("dot").style.background = "var(--ok)"; sendPing(); };
+  ws.onmessage = ev => {
+    if (SID !== mySid || WS !== ws) return;
+    let f; try { f = JSON.parse(ev.data); } catch (e) { return; }
+    if (f.t === "pong") { if (typeof f.c === "number") noteRtt(performance.now() - f.c); return; }
+    if (f.t === "ack" || f.t === "error") { settle(f.id, f.t === "ack" ? f : {ok: false, reason: f.error}); return; }
+    frames++; lastFrameAt = performance.now(); wsFails = 0;
+    onFrame(f);
+  };
+  ws.onclose = ws.onerror = () => {
+    if (WS !== ws) return;
+    WS = null;
+    for (const id of Array.from(acks.keys())) settle(id, {ok: false, reason: "connection lost: play it again"});
+    if (SID !== mySid) return;
+    wsFails += frames ? 1 : 2;                             // never got a frame: likely blocked, poll right away
+    $("dot").style.background = "var(--warn)";
+    setTimeout(() => { if (SID === mySid && !WS) connect(); }, 400);
+  };
+}
+function sendPing() { if (WS && WS.readyState === 1) WS.send(JSON.stringify({t: "ping", c: performance.now(), rtt: rttEma ? Math.round(rttEma) : null})); }
+setInterval(sendPing, 2000);                               // keepalive and the round trip shown next to the dot
+setInterval(() => {                                        // a WebSocket held back somewhere: poll from now on
+  if (!WS) return;
+  const now = performance.now();
+  if (WS.readyState === 0 && now - wsStart > 4000) { wsFails = 9; WS.close(); return; }      // never opened
+  if (WS.readyState !== 1) return;
+  const quiet = now - Math.max(lastFrameAt, wsStart);     // the server sends a frame at once, then every tick
+  if ((S && !S.paused && !S.over && quiet > 1500) || (!S && quiet > 3000)) { wsFails = 9; WS.close(); }
+}, 500);
+async function connectPoll() {
+  const mySid = SID;
+  let after = -1, fails = 0;
+  while (SID === mySid && !WS) {
+    const t0 = performance.now();
+    try {
+      const f = await getj("/api/state?sid=" + encodeURIComponent(mySid) + "&after=" + after + (rttEma ? "&rtt=" + Math.round(rttEma) : ""));
+      if (SID !== mySid) return;
+      fails = 0; $("dot").style.background = "var(--ok)";
+      const ms = performance.now() - t0;
+      if (f.kind !== "queued" && (!S || f.v !== S.v)) noteRtt(ms);
+      if (typeof f.v === "number") after = f.v;
+      lastFrameAt = performance.now();
+      onFrame(f);
+      if (f.kind === "queued" || f.kind === "ended") await sleep(1000);
+    } catch (e) {
+      fails++; $("dot").style.background = fails > 2 ? "var(--foe)" : "var(--warn)";
+      await sleep(Math.min(3000, 300 * fails));
+    }
+  }
+}
+// ---- the player's plays: shown at once where they will land, confirmed by the server (ack, then the board)
+let pending = [], playSeq = 0;                             // plays sent and not yet on the board
+const pendingCost = () => pending.reduce((a, p) => a + cardsById[p.card].cost, 0);
+function settle(id, r) { const a = acks.get(id); if (!a) return; acks.delete(id); clearTimeout(a.timer); a.resolve(r); }
+function dropPending(id) { const n = pending.length; pending = pending.filter(p => p.id !== id); if (pending.length !== n && S) updatePanels(); }
+function sendPlay(card, tx, ty) {
+  const id = "p" + (++playSeq) + Math.random().toString(36).slice(2, 7);
+  pending.push({id: id, card: card, tx: tx, ty: ty, t0: performance.now()});
+  const done = r => { if (!r.ok) { dropPending(id); toast(r.reason || "not played"); } };
+  if (WS && WS.readyState === 1) {
+    new Promise(resolve => {
+      acks.set(id, {resolve: resolve, timer: setTimeout(() => settle(id, {ok: false, reason: "no answer from the server: play it again"}), 4000)});
+      WS.send(JSON.stringify({t: "play", id: id, card: card, tx: tx, ty: ty}));
+    }).then(done);
+  } else post("/api/play", {sid: SID, id: id, card: card, tx: tx, ty: ty}).then(done, e => done({ok: false, reason: e.message}));
+}
+function onFrame(f) {
+  if (f.kind === "queued") { show("queue"); $("qpos").textContent = f.position; $("qinfo").textContent = "in line · " + f.playing + " of " + f.max_players + " seats in use"; return; }
+  if (f.kind === "ended") { stopSession(); show("lobby"); refreshBoard(); return; }
+  if (chromeFor !== SID || !$("game").classList.contains("on")) { show("game"); setupGameChrome(f.kind); chromeFor = SID; }
+  ingest(f);
+}
+$("qleave").onclick = async () => { try { await post("/api/leave", {sid: SID}); } catch (e) {} stopSession(); show("lobby"); refreshBoard(); };
+$("leavebtn").onclick = async () => {
+  if (KIND === "match" && S && !S.over && !confirm("Leave this match? It will count as unfinished.")) return;
+  try { await post("/api/leave", {sid: SID}); } catch (e) {}
+  stopSession(); show("lobby"); refreshBoard();
+};
+function setupGameChrome(kind) {
+  const sp = $("speedsel"); sp.innerHTML = "";
+  for (const v of (kind === "replay" ? META.replay_speeds : META.speeds)) { const o = el("option", "", v + "×"); o.value = v; sp.appendChild(o); }
+  const watching = kind === "replay" || KIND === "spectate";
+  $("replaybar").style.display = kind === "replay" ? "flex" : "none";
+  $("toggles").style.display = "flex";
+  for (const id of ["assist", "tg-commentary", "tg-winprob", "rankedchip"]) $(id).style.display = watching ? "none" : "";
+  $("hand").style.pointerEvents = watching ? "none" : "";
+  $("pausebtn").style.display = KIND === "spectate" ? "none" : "";
+  $("speedsel").style.display = KIND === "spectate" ? "none" : "";
+  $("sidenote").textContent = kind === "replay" ? "Replay: re-simulated from the recorded seed and plays." :
+    KIND === "spectate" ? "Watching live from the player's side: their hand and elixir are shown; the policy's cards and elixir stay hidden until the end, as for the player." :
+    document.body.classList.contains("phone") ? "Tap a card, then a tile on your half. With Assist on, the gold ring is the policy's pick." :
+    "Tap a card, then a tile. Keys: 1–4 pick a card, Esc cancels, Space pauses, L names.";
+  $("foename").textContent = META.label;
+  for (const k of ["commentary", "winprob"]) {
+    const t = $("tg-" + k); t.classList.toggle("dis", !META.claude);
+    t.title = META.claude ? (k === "commentary" ? "Claude Opus 5.5 comments on the match every ~10 s of game time" : "Claude Opus 5.5's probability that you win, updated every ~10 s") : "Owner only: Claude runs on the owner's own Claude subscription.";
+  }
+}
+
+// ======================================================================= state, interpolation
+const E = {id:0, mine:1, unit:2, card:3, kind:4, x:5, y:6, hp:7, maxhp:8, shield:9, r:10, fly:11, dep:12,
+  stun:13, slow:14, hid:15, tgt:16, atk:17, bur:18, depms:19, tidx:20};
+let tracks = new Map(), ptracks = new Map(), dying = [], popups = [], towerPos = {};
+let lastTick = -1, seenEvents = new Set(), legalBits = null, selected = null, hover = null, showLabels = true, shownResult = false;
+let lastArrive = 0, arriveEma = 0, capTick = -1, capAt = 0;
+function resetBoard() { tracks = new Map(); ptracks = new Map(); dying = []; popups = []; towerPos = {}; lastTick = -1; seenEvents = new Set(); selected = null; shownResult = false; lastArrive = 0; arriveEma = 0;
+  pending = []; handKey = ""; drag = null; hover = null; lastFrameAt = 0;
+  for (const k of Object.keys(towerFx)) delete towerFx[k]; unitFx.clear(); towerKey = ""; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function posOf(tr, now) { const t = tr.dur > 0 ? Math.min(1, (now - tr.t0) / tr.dur) : 1; return [lerp(tr.fx, tr.tx, t), lerp(tr.fy, tr.ty, t)]; }
+function ingest(s) {
+  if (S && s.tick < lastTick) { tracks.clear(); ptracks.clear(); dying = []; lastTick = -1; seenEvents = new Set(); }
+  const now = performance.now();
+  if (lastArrive) arriveEma = arriveEma ? 0.8 * arriveEma + 0.2 * Math.min(600, now - lastArrive) : Math.min(600, now - lastArrive);
+  lastArrive = now;
+  const ticks = lastTick >= 0 ? Math.max(1, Math.min(10, s.tick - lastTick)) : 1;
+  const dur = Math.max(ticks * 1000 / (META.tps * (s.speed || 1)), Math.min(400, arriveEma * 1.05));
+  const seen = new Set();
+  for (const e of s.ents) {
+    const id = e[E.id]; seen.add(id);
+    const tr = tracks.get(id);
+    if (tr && tr.e[E.unit] === e[E.unit]) { const c = posOf(tr, now); tr.fx = c[0]; tr.fy = c[1]; tr.tx = e[E.x]; tr.ty = e[E.y]; tr.t0 = now; tr.dur = dur; tr.e = e; }
+    else tracks.set(id, {fx: e[E.x], fy: e[E.y], tx: e[E.x], ty: e[E.y], t0: now, dur: 0, e: e});
+    if (e[E.kind] === "tower") towerPos[(e[E.mine] ? "me" : "foe") + e[E.tidx]] = [e[E.x], e[E.y]];
+  }
+  for (const [id, tr] of tracks) if (!seen.has(id)) { const c = posOf(tr, now); dying.push({x: c[0], y: c[1], e: tr.e, t0: now}); tracks.delete(id); unitFx.delete(id); }
+  const pseen = new Set();
+  for (const p of s.projs) {
+    const id = p[0]; pseen.add(id);
+    const tr = ptracks.get(id);
+    if (tr && tr.p[2] === p[2]) { const c = posOf(tr, now); tr.fx = c[0]; tr.fy = c[1]; tr.tx = p[4]; tr.ty = p[5]; tr.t0 = now; tr.dur = dur; tr.p = p; }
+    else ptracks.set(id, {fx: p[4], fy: p[5], tx: p[4], ty: p[5], t0: now, dur: 0, p: p});
+  }
+  for (const id of Array.from(ptracks.keys())) if (!pseen.has(id)) ptracks.delete(id);
+  for (const ev of s.events) {                       // new plays -> name pops up where the unit lands
+    const k = ev.tick + ":" + ev.who + ":" + ev.card;
+    if (seenEvents.has(k)) continue;
+    seenEvents.add(k);
+    if (ev.pid) dropPending(ev.pid);                   // our play reached the board (or was refused): drop its placeholder
+    if (lastTick < 0) continue;
+    if (ev.result === "OK") {
+      popups.push({x: ev.xy_human_frame[0], y: ev.xy_human_frame[1], text: ev.name, mine: ev.who === "human", t0: now});
+      feed(ev.who === "human" ? (ev.auto ? "Autopilot" : "You") : "Policy", ev.who === "human", " played " + ev.name);
+    } else if (ev.who === "human" && KIND === "match") toast(ev.name + " not played: " + ev.result.toLowerCase().split("_").join(" "));
+  }
+  lastTick = s.tick;
+  legalBits = s.legal ? Uint8Array.from(atob(s.legal), c => c.charCodeAt(0)) : null;
+  S = s;
+  if (now - panelsAt > 80 || s.over || !panelsAt) { panelsAt = now; updatePanels(); } else panelsDirty = true;
+}
+let panelsAt = 0, panelsDirty = false;
+function legal(slot, tx, ty) {
+  if (!legalBits || slot < 0) return false;
+  const i = slot * 576 + ty * 18 + tx;
+  return (legalBits[i >> 3] >> (7 - (i & 7))) & 1;
+}
+
+// ======================================================================= panels
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.style.opacity = 1; clearTimeout(toast.h); toast.h = setTimeout(() => t.style.opacity = 0, 1800); }
+function feed(who, mine, rest) { const f = $("feed"); f.textContent = ""; f.appendChild(el("span", mine ? "me-t" : "foe-t", who)); f.appendChild(document.createTextNode(rest)); }
+function buildElixir() { const segs = $("elixirsegs"); if (segs.children.length === 10) return; segs.innerHTML = ""; for (let i = 0; i < 10; i++) { const d = el("div", "seg"); d.appendChild(el("i")); segs.appendChild(d); } }
+function updatePanels() {
+  const s = S;
+  buildElixir();
+  $("foecrowns").textContent = s.crowns[1] + CROWN; $("mecrowns").textContent = s.crowns[0] + CROWN;
+  if (KIND === "spectate") $("foename").textContent = "Watching " + (s.player_name || "?") + " (blue) vs " + META.label;
+  $("watchers").textContent = s.spectators ? s.spectators + " watching" : "";
+  $("watchers").style.display = s.spectators ? "" : "none";
+  $("hudcrowns").textContent = "Policy " + s.crowns[1] + CROWN;
+  $("hudclock").textContent = fmtClock(s.tick);
+  const wpOn = !!(s.claude && s.claude.winprob) && s.winprob && s.winprob.length;
+  $("hudwp").style.display = wpOn ? "" : "none";
+  $("hudwp").textContent = wpOn ? "you win " + Math.round(100 * s.winprob[s.winprob.length - 1][1]) + "%" : "";
+  const lastC = s.comments && s.comments.length ? s.comments[s.comments.length - 1] : null;
+  if (lastC && s.claude && s.claude.commentary && lastC.tick !== capTick) { capTick = lastC.tick; capAt = performance.now(); $("hudcap").textContent = lastC.text; voiceLine(lastC); }
+  voiceTick(s);
+  $("hudcap").style.display = document.body.classList.contains("phone") && capAt && performance.now() - capAt < 7000 ? "block" : "none";
+  $("clock").textContent = fmtClock(s.tick);
+  const seen = $("foeseen"); seen.innerHTML = "";
+  if (s.kind === "match" && !s.over) seen.appendChild(el("span", "muted small", "its cards and elixir stay hidden, as in a real match"));
+  else for (const c of (s.model_deck || s.model_seen)) seen.appendChild(el("span", "chip", cardIcon(c) + " " + cardsById[c].name));
+  const segs = $("elixirsegs").children;
+  const ex = Math.max(0, s.elixir - pendingCost());        // what is left once the plays on their way land
+  for (let i = 0; i < 10; i++) segs[i].firstChild.style.transform = "scaleX(" + Math.max(0, Math.min(1, ex - i)) + ")";
+  $("elixirnum").textContent = ex.toFixed(1);
+  $("rate").textContent = s.elixir_rate >= 150 ? "3×" : s.elixir_rate >= 100 ? "2×" : "";
+  $("pausebtn").textContent = s.paused ? "Resume" : "Pause";
+  if (document.activeElement !== $("speedsel")) $("speedsel").value = String(s.speed);
+  // hand
+  const hand = $("hand");
+  if (hand.children.length !== 5) {
+    hand.innerHTML = ""; handKey = "";
+    hand.appendChild(el("div", "card next"));
+    for (let i = 0; i < 4; i++) { const d = el("div", "card"); hand.appendChild(d); bindCard(d, i); }
+  }
+  const adv = {}; if (s.advisor && s.advice) for (const a of s.advice.cards) adv[a.card] = a;
+  const hk = s.next + "|" + s.hand.join(",") + "|" + Object.keys(adv).map(c => c + ":" + Math.round(100 * adv[c].p)).join(",");
+  if (hk !== handKey) {                                // only when the hand changed: never under a finger mid-tap
+    handKey = hk;
+    const nx = hand.children[0]; nx.innerHTML = ""; nx.appendChild(el("div", "small muted", "Next")); nx.appendChild(el("div", "ic emoji", cardIcon(s.next))); nx.appendChild(el("div", "nm", cardsById[s.next].name));
+    for (let i = 0; i < 4; i++) {
+      const c = s.hand[i], k = cardsById[c], d = hand.children[i + 1];
+      d.innerHTML = "";
+      d.appendChild(el("span", "cost", String(k.cost))); d.appendChild(el("span", "key", String(i + 1)));
+      d.appendChild(el("div", "ic emoji", cardIcon(c))); d.appendChild(el("div", "nm", k.name));
+      if (adv[c]) d.appendChild(el("span", "adv", Math.round(100 * adv[c].p) + "%"));
+    }
+  }
+  const spent = pendingCost();
+  for (let i = 0; i < 4; i++) {
+    const c = s.hand[i], d = hand.children[i + 1];
+    d.classList.toggle("sel", selected === c);
+    d.classList.toggle("poor", s.elixir - spent + 1e-9 < cardsById[c].cost);
+    d.classList.toggle("sending", pending.some(p => p.card === c));
+  }
+  if (selected !== null && s.hand.indexOf(selected) < 0 && !(drag && drag.card === selected)) selected = null;
+  // toggles + side panels
+  for (const b of document.querySelectorAll("#assist button")) b.classList.toggle("on", +b.dataset.l === (s.assist || 0));
+  $("autopill").style.display = s.assist === 2 && KIND === "match" && !s.over ? "block" : "none";
+  $("tg-voice").classList.toggle("on", voiceOn);
+  const vs = $("voicesel"); vs.style.display = META.neural_voice && KIND === "match" ? "" : "none";
+  if (s.voice && document.activeElement !== vs) {
+    const want = store("pr_voice_name");                                     // this browser's choice wins
+    if (KIND === "match" && want && want !== s.voice && voiceSent !== SID) { voiceSent = SID; post("/api/control", {sid: SID, voice: want}).catch(() => {}); }
+    vs.value = s.voice;
+  }
+  $("advtitle").textContent = s.assist === 2 ? "Autopilot: the policy is playing for you" : "Hint: the policy's pick for you";
+  $("tg-commentary").classList.toggle("on", !!(s.claude && s.claude.commentary));
+  $("tg-winprob").classList.toggle("on", !!(s.claude && s.claude.winprob));
+  const rc = $("rankedchip"); rc.textContent = s.ranked ? "ranked" : "unranked"; rc.style.color = s.ranked ? "#6fd39b" : "var(--muted)";
+  rc.title = s.ranked ? "1× speed and no assist so far: this match counts on the leaderboard" : "Assist was on or the speed was below 1×: not on the leaderboard";
+  renderTowers(s);
+  $("advpanel").style.display = s.advisor ? "" : "none";
+  if (s.advisor) renderAdvice(s.advice);
+  const showCm = !!(s.claude && s.claude.commentary), showWp = !!(s.claude && s.claude.winprob);
+  $("cmpanel").style.display = showCm ? "" : "none"; $("wppanel").style.display = showWp ? "" : "none";
+  if (showCm) renderComments(s);
+  if (showWp) renderWinprob(s);
+  $("cmwait").textContent = s.claude_note ? s.claude_note : s.claude_wait ? "thinking…" : "";
+  // replay bar
+  if (s.kind === "replay" && s.replay) {
+    const sk = $("seek"); sk.max = s.replay.final_tick; if (!seeking) sk.value = s.tick;
+    $("rptime").textContent = fmtElapsed(s.tick) + " / " + fmtElapsed(s.replay.final_tick);
+    const b = $("rpbadge"), sm = s.replay.summary;
+    b.textContent = (sm.name || "?") + " · " + (s.replay.mismatch ? "⚠ " + s.replay.mismatch : s.replay.verified ? "✓ verified" : "replay");
+    b.title = s.replay.verified ? "The re-simulation reproduced the recorded final state exactly" : "";
+  }
+  // banners
+  const b = $("banner");
+  if (s.abandoned && !s.over) { b.style.display = "block"; b.textContent = KIND === "spectate" ? (s.player_name || "The player") + " left the match" : "The match ended"; }
+  else if (s.lockout > 0 && s.kind === "match") { b.style.display = "block"; b.textContent = "Deploy in " + (s.lockout / META.tps).toFixed(1) + " s"; }
+  else if (s.paused) { b.style.display = "block"; b.textContent = "Paused"; }
+  else b.style.display = "none";
+  if (s.over && !shownResult) showResult();
+}
+let towerKey = "";
+function renderTowers(s) {
+  const key = JSON.stringify(s.towers.map(t => [t.side, t.idx, t.hp, t.alive, t.active]));
+  if (key === towerKey) return;
+  towerKey = key;
+  const box = $("twbody"); box.innerHTML = "";
+  for (const side of ["foe", "me"]) {
+    const row = el("div", "twrow"); row.appendChild(el("span", side === "me" ? "me-t" : "foe-t", side === "me" ? "You" : "Policy"));
+    const list = s.towers.filter(t => t.side === side).map(t => ({t: t, x: t.x}));
+    list.sort((a, b) => a.x - b.x);
+    for (const o of list) {
+      const t = o.t, d = el("div", "tw" + (t.alive ? "" : " dead"));
+      const lb = el("div", "lb"); lb.appendChild(el("span", "", t.idx === 0 ? "King" + (t.alive && !t.active ? " (asleep)" : "") : "Princess")); lb.appendChild(el("span", "", Math.round(100 * Math.max(0, t.hp) / t.max_hp) + "%"));
+      d.appendChild(lb); d.appendChild(el("div", "n", t.alive ? String(t.hp) : "destroyed"));
+      const b = el("div", "b"), i = el("i"); i.style.width = (100 * Math.max(0, t.hp) / t.max_hp) + "%"; i.style.background = side === "me" ? "#4f8ff7" : "#e5484d"; b.appendChild(i); d.appendChild(b);
+      row.appendChild(d);
+    }
+    box.appendChild(row);
+  }
+  $("twcrowns").textContent = "crowns " + s.crowns[0] + " – " + s.crowns[1];
+}
+function renderAdvice(a) {
+  const box = $("advbody"); box.innerHTML = "";
+  if (!a) { box.textContent = "…"; return; }
+  for (const c of a.cards) {
+    const r = el("div", "row"); r.style.margin = "2px 0";
+    r.appendChild(el("span", "emoji", cardIcon(c.card))); r.appendChild(el("b", "", cardsById[c.card].name));
+    r.appendChild(el("span", "muted", "at (" + c.tx + "," + c.ty + ")")); r.appendChild(el("span", "chip", Math.round(100 * c.p) + "%"));
+    box.appendChild(r);
+  }
+  box.appendChild(el("div", "muted", "Wait: " + Math.round(100 * a.wait) + "%" + (a.cards.length ? " · the gold ring marks the top card's tile" : "")));
+}
+function renderComments(s) {
+  const box = $("comments"); box.innerHTML = "";
+  const list = (s.comments || []).slice().reverse();
+  for (const c of list) { const d = el("div"); d.appendChild(el("span", "t", fmtElapsed(c.tick))); d.appendChild(document.createTextNode(c.text)); box.appendChild(d); }
+  if (!list.length) box.appendChild(el("div", "muted", "The first comment arrives about 10 s into the match."));
+}
+function renderWinprob(s) {
+  const svg = $("wpchart"), W = 300, H = 150, L = 30, R = 8, T = 8, B = 20;
+  const pts = s.winprob || [];
+  const xmax = Math.max(META.regulation, s.tick, pts.length ? pts[pts.length - 1][0] : 0);
+  const X = t => L + (W - L - R) * t / xmax, Y = p => T + (H - T - B) * (1 - p);
+  let h = "";
+  for (const p of [0, 0.25, 0.5, 0.75, 1]) h += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(p) + '" y2="' + Y(p) + '" stroke="' + (p === 0.5 ? "#6b7785" : "#26313c") + '"' + (p === 0.5 ? ' stroke-dasharray="4 3"' : "") + '/>' +
+    '<text x="' + (L - 4) + '" y="' + (Y(p) + 3) + '" fill="#8b98a5" font-size="9" text-anchor="end">' + Math.round(p * 100) + '%</text>';
+  for (let m = 0; m <= xmax; m += 60 * META.tps) h += '<text x="' + X(m) + '" y="' + (H - 6) + '" fill="#8b98a5" font-size="9" text-anchor="middle">' + (m / META.tps / 60) + ':00</text>';
+  if (pts.length) {
+    let d = "M" + X(0) + "," + Y(0.5), a = "";
+    for (const p of pts) d += " L" + X(p[0]).toFixed(1) + "," + Y(pts.indexOf(p) ? pts[pts.indexOf(p) - 1][1] : 0.5).toFixed(1) + " L" + X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1);
+    d += " L" + X(s.tick).toFixed(1) + "," + Y(pts[pts.length - 1][1]).toFixed(1);
+    a = d + " L" + X(s.tick).toFixed(1) + "," + Y(0) + " L" + X(0) + "," + Y(0) + " Z";
+    h += '<path d="' + a + '" fill="rgba(242,201,76,.12)"/>';
+    h += '<path d="' + d + '" fill="none" stroke="#f2c94c" stroke-width="2"/>';
+    const last = pts[pts.length - 1];
+    h += '<circle cx="' + X(s.tick) + '" cy="' + Y(last[1]) + '" r="3.5" fill="#f2c94c"/>';
+    $("wpnow").textContent = Math.round(100 * last[1]) + "%";
+  } else $("wpnow").textContent = "–";
+  svg.innerHTML = h;
+}
+function showResult() {
+  shownResult = true;
+  if (S.kind === "replay") return;
+  const r = S.result, who = KIND === "spectate" ? (S.player_name || "The player") : null;
+  $("rbig").textContent = who ? (r > 0 ? who + " wins" : r < 0 ? who + " loses" : "Draw") : (r > 0 ? "You win" : r < 0 ? "You lose" : "Draw");
+  $("ragain").textContent = who ? "Play yourself" : "Play again";
+  $("rbig").style.color = r > 0 ? "var(--me)" : r < 0 ? "var(--foe)" : "var(--text)";
+  $("rsub").textContent = S.crowns[0] + " – " + S.crowns[1] + " crowns · " + (S.end_reason || "").toLowerCase().split("_").join(" ") + " · " + fmtElapsed(S.tick);
+  $("rnote").textContent = (S.ranked ? "Ranked: this match counts on the leaderboard." : "Unranked (assist used or speed below 1×).") +
+    (S.model_deck ? " The policy's deck" + (S.deck_labels && S.deck_labels.model ? " (" + S.deck_labels.model + ")" : "") + ": " + S.model_deck.map(c => cardsById[c].name).join(", ") + "." : "");
+  $("result").style.display = "flex";
+}
+$("rlobby").onclick = () => { $("result").style.display = "none"; stopSession(); show("lobby"); refreshBoard(); };
+$("ragain").onclick = () => { $("result").style.display = "none"; stopSession(); $("play").onclick(); };
+$("rwatch").onclick = () => { const id = S && S.match_id; $("result").style.display = "none"; if (id) watch(id); };
+function selectSlot(i) { if (!S || S.over || KIND !== "match") return; const c = S.hand[i]; selected = selected === c ? null : c; updatePanels(); }
+function toggle(k) {
+  if (!S || KIND !== "match") return;
+  if ((k === "commentary" || k === "winprob") && !META.claude) { toast("Owner only: Claude runs on the owner's own subscription."); return; }
+  const cur = !!(S.claude && S.claude[k]);
+  const body = {sid: SID}; body[k] = !cur;
+  post("/api/control", body).catch(e => toast(e.message));
+}
+function setAssist(level) {
+  if (!S || KIND !== "match" || S.over || (S.assist || 0) === level) return;
+  if (level > 0 && S.ranked && !confirm("Assist makes this match unranked. Continue?")) return;
+  post("/api/control", {sid: SID, assist: level}).catch(e => toast(e.message));
+  if (level === 2) toast("Autopilot on: the policy plays for you. Play any card yourself at any time.");
+}
+for (const b of document.querySelectorAll("#assist button")) b.onclick = () => setAssist(+b.dataset.l);
+// ---- Voice: Claude's commentary read aloud by the browser's own speech synthesis (free, nothing leaves the page)
+let voiceOn = store("pr_voice") === "1", voicePick = null, voiceSent = null;
+$("voicesel").onchange = ev => { store("pr_voice_name", ev.target.value); if (KIND === "match") post("/api/control", {sid: SID, voice: ev.target.value}).catch(e => toast(e.message)); };
+function pickVoice() {                                       // the most natural English voice this browser has
+  if (!window.speechSynthesis) return null;
+  const vs = speechSynthesis.getVoices(); if (!vs.length) return null;
+  const score = v => (/^en/i.test(v.lang) ? 100 : -1000)
+    + (/natural|neural/i.test(v.name) ? 60 : 0)             // Edge's neural "Online (Natural)" voices
+    + (/premium|enhanced|siri/i.test(v.name) ? 50 : 0)      // Apple's high-quality voices
+    + (/google/i.test(v.name) ? 30 : 0)                     // Chrome's network voices
+    + (/online/i.test(v.name) ? 10 : 0) + (/en[-_](gb|us)/i.test(v.lang) ? 5 : 0)
+    + (/ryan|guy|daniel|arthur|davis|andrew|brian|male/i.test(v.name) ? 3 : 0);
+  return vs.slice().sort((a, b) => score(b) - score(a))[0];
+}
+if (window.speechSynthesis) speechSynthesis.onvoiceschanged = () => { voicePick = pickVoice(); };
+// The neural voice (Chatterbox, on the server) when it runs: each line's clip is played when ready; if it is not
+// ready within 8 s (or cannot play), the browser's own voice reads the line instead.
+let voiceAudio = null, pendingVoice = null;
+function silentWav() {                                           // 0.05 s of silence: unlocks audio on phones
+  const n = 1200, b = new ArrayBuffer(44 + n * 2), v = new DataView(b), w = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 24000, true); v.setUint32(28, 48000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+  let bin = ""; const u8 = new Uint8Array(b); for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+  return "data:audio/wav;base64," + btoa(bin);
+}
+function voiceLine(c) {                                          // a new commentary line: neural clip or browser voice
+  if (!voiceOn || !c) return;
+  if (c.audio && META.neural_voice) pendingVoice = {id: c.audio, text: c.text, t0: performance.now()};
+  else speak(c.text);
+}
+function voiceTick(s) {
+  if (!pendingVoice) return;
+  let c = null; for (const x of (s.comments || [])) if (x.audio === pendingVoice.id) c = x;
+  if (c && c.ready) {
+    const pv = pendingVoice; pendingVoice = null;
+    if (window.speechSynthesis) speechSynthesis.cancel();
+    if (!voiceAudio) voiceAudio = new Audio();
+    voiceAudio.src = withTok("/api/audio?id=" + encodeURIComponent(pv.id));
+    voiceAudio.play().catch(() => speak(pv.text));
+  } else if (performance.now() - pendingVoice.t0 > 8000) { const pv = pendingVoice; pendingVoice = null; speak(pv.text); }
+}
+function speak(text) {
+  if (!voiceOn || !window.speechSynthesis || !text) return;
+  if (!voicePick) voicePick = pickVoice();
+  if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();     // never fall behind the match
+  // a little expression: each phrase gets its own pace and pitch from its punctuation (! excited, ? rising)
+  const parts = text.match(/[^,;:!?.\u2014-]+[,;:!?.\u2014-]*/g) || [text];
+  for (const ph of parts) {
+    const t = ph.trim(); if (!t) continue;
+    const u = new SpeechSynthesisUtterance(t);
+    if (voicePick) u.voice = voicePick;
+    const bang = /!/.test(t), ask = /\?/.test(t);
+    u.rate = bang ? 1.15 : ask ? 1.0 : 1.05;
+    u.pitch = bang ? 1.15 : ask ? 1.2 : 0.95;
+    u.volume = 1;
+    speechSynthesis.speak(u);
+  }
+}
+$("tg-voice").onclick = () => {
+  if (!window.speechSynthesis) { toast("This browser cannot speak."); return; }
+  voiceOn = !voiceOn; store("pr_voice", voiceOn ? "1" : "0"); $("tg-voice").classList.toggle("on", voiceOn);
+  if (voiceOn) {
+    if (!voiceAudio) voiceAudio = new Audio();                   // this tap unlocks audio playback on phones
+    voiceAudio.src = silentWav(); voiceAudio.play().catch(() => {});
+    voicePick = pickVoice();
+    if (META.neural_voice) toast("Voice: Chatterbox neural voice (from the server)");
+    else {
+      speak("Commentary voice on. Ladies and gentlemen, brace yourselves!");
+      if (voicePick) toast("Voice: " + voicePick.name + (/natural|neural|premium|enhanced/i.test(voicePick.name) ? "" : " (Edge's Natural voices sound more human)"));
+    }
+  } else { pendingVoice = null; if (voiceAudio) voiceAudio.pause(); speechSynthesis.cancel(); }
+};
+$("tg-commentary").onclick = () => toggle("commentary");
+$("tg-winprob").onclick = () => toggle("winprob");
+
+// ======================================================================= board drawing
+const cv = $("cv"), ctx = cv.getContext("2d");
+if (!CanvasRenderingContext2D.prototype.roundRect) CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h) { this.rect(x, y, w, h); };
+let T = 20, DPR = 1;
+function resize() {
+  const w = $("boardwrap").clientWidth, h = $("boardwrap").clientHeight;
+  T = Math.max(8, Math.floor(Math.min(w / 18, h / 32)));
+  DPR = Math.min(2, window.devicePixelRatio || 1);          // 3x phone screens: 2x looks the same, draws 2.25x less
+  cv.style.width = 18 * T + "px"; cv.style.height = 32 * T + "px";
+  cv.width = Math.round(18 * T * DPR); cv.height = Math.round(32 * T * DPR);
+  bgKey = "";
+}
+const homes = {};
+function setPhone() {
+  const coarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  const phone = window.innerWidth <= 760 || (coarse && window.innerWidth <= 1024);
+  if (setPhone.done && phone === document.body.classList.contains("phone")) return;
+  setPhone.done = true;
+  document.body.classList.toggle("phone", phone);
+  for (const id of ["topbar", "toggles", "side"]) {             // phone: into the Menu sheet; else back home
+    const n = $(id);
+    if (!homes[id]) homes[id] = [n.parentNode, n.nextSibling];
+    if (phone) $("sheetbody").appendChild(n); else homes[id][0].insertBefore(n, homes[id][1]);
+  }
+  if (!phone) $("sheet").style.display = "none";
+  if ($("game").classList.contains("on")) resize();
+}
+$("menubtn").onclick = () => { $("sheet").style.display = "block"; };
+$("sheetclose").onclick = () => { $("sheet").style.display = "none"; };
+$("sheet").addEventListener("click", ev => { if (ev.target.id === "sheet") $("sheet").style.display = "none"; });
+window.addEventListener("resize", () => { setPhone(); if ($("game").classList.contains("on")) resize(); });
+let lastWrap = "";
+if (window.ResizeObserver) new ResizeObserver(() => {
+  const w = $("boardwrap"), k = w.clientWidth + "x" + w.clientHeight;
+  if (k !== lastWrap && $("game").classList.contains("on")) { lastWrap = k; resize(); }
+}).observe($("boardwrap"));
+const P = v => v / 1000 * T;
+// ---------------------------------------------------------------- the board's look (procedural: shapes and generic emoji, no game art)
+let BG = null, bgKey = "", riverPath = null;
+const towerFx = {}, unitFx = new Map();
+function hash01(i) { const x = Math.sin(i * 12.9898 + 78.233) * 43758.5453; return x - Math.floor(x); }
+function shade(rgb, v) { return "rgb(" + Math.round(rgb[0] + v) + "," + Math.round(rgb[1] + v) + "," + Math.round(rgb[2] + v * 0.6) + ")"; }
+function drawGrass(g, x, y, odd, n, mineHalf) {
+  const base = odd ? [84, 156, 70] : [95, 168, 80];
+  const tint = mineHalf ? [-5, 0, 10] : [10, -2, -6];
+  g.fillStyle = shade([base[0] + tint[0], base[1] + tint[1], base[2] + tint[2]], (n - 0.5) * 10);
+  g.fillRect(x, y, T + 0.5, T + 0.5);
+  const e = Math.max(1, T * 0.06);
+  g.fillStyle = "rgba(255,255,255,.07)"; g.fillRect(x, y, T, e); g.fillRect(x, y, e, T);
+  g.fillStyle = "rgba(0,0,0,.08)"; g.fillRect(x, y + T - e, T, e); g.fillRect(x + T - e, y, e, T);
+  g.strokeStyle = "rgba(25,75,25,.35)"; g.lineWidth = 1;
+  for (let k = 0; k < 3; k++) {
+    const bx = x + T * (0.15 + 0.7 * hash01(n * 100 + k)), by = y + T * (0.3 + 0.6 * hash01(n * 200 + k));
+    g.beginPath(); g.moveTo(bx, by); g.lineTo(bx + T * 0.05, by - T * 0.15); g.stroke();
+  }
+}
+function drawHedge(g, x, y, n) {
+  g.fillStyle = "#2a5528"; g.fillRect(x, y, T + 0.5, T + 0.5);
+  for (let k = 0; k < 3; k++) {
+    g.fillStyle = k % 2 ? "#36692f" : "#224a24";
+    g.beginPath(); g.arc(x + T * (0.25 + 0.5 * hash01(n * 31 + k)), y + T * (0.25 + 0.5 * hash01(n * 57 + k)), T * 0.3, 0, 7); g.fill();
+  }
+}
+function drawBridge(g, x, y) {
+  g.fillStyle = "#8f6d44"; g.fillRect(x, y, T + 0.5, T + 0.5);
+  g.strokeStyle = "rgba(55,35,15,.55)"; g.lineWidth = 1;
+  for (let k = 1; k < 4; k++) { g.beginPath(); g.moveTo(x, y + k * T / 4); g.lineTo(x + T, y + k * T / 4); g.stroke(); }
+  g.fillStyle = "#5a3f25"; g.fillRect(x - T * 0.06, y, T * 0.14, T + 0.5); g.fillRect(x + T - T * 0.08, y, T * 0.14, T + 0.5);
+}
+function drawPad(g, x, y, n) {
+  const v = 150 + n * 16;
+  g.fillStyle = "rgb(" + v + "," + (v + 5) + "," + (v + 9) + ")"; g.fillRect(x + 0.5, y + 0.5, T - 1, T - 1);
+  g.strokeStyle = "rgba(0,0,0,.20)"; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, T - 1, T - 1);
+}
+function buildBackground(seat) {
+  const key = T + "|" + DPR + "|" + seat + "|" + cv.width + "x" + cv.height;
+  if (BG && bgKey === key) return;
+  bgKey = key;
+  BG = document.createElement("canvas"); BG.width = cv.width; BG.height = cv.height;
+  const g = BG.getContext("2d"); g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const rows = META.terrain[seat];
+  riverPath = new Path2D();
+  for (let ty = 0; ty < 32; ty++) for (let tx = 0; tx < 18; tx++) {
+    const ch = rows[ty][tx], x = tx * T, y = ty * T, n = hash01(ty * 18 + tx + seat * 1000);
+    if (ch === "~") { riverPath.rect(x, y, T, T); continue; }           // water is drawn live (it moves)
+    if (ch === "=") { drawBridge(g, x, y); continue; }
+    if (ch === ":") { drawHedge(g, x, y, n); continue; }
+    drawGrass(g, x, y, (tx + ty) % 2, n, ty >= 16);
+    if (ch === "T") drawPad(g, x, y, n);
+  }
+  g.fillStyle = "rgba(214,190,140,.6)";                                  // sandy river banks
+  for (let tx = 0; tx < 18; tx++) {
+    if (rows[15][tx] === "~") g.fillRect(tx * T, 15 * T - T * 0.12, T, T * 0.12);
+    if (rows[16][tx] === "~") g.fillRect(tx * T, 17 * T, T, T * 0.12);
+  }
+  const w = Math.max(2, T * 0.16);                                       // the arena wall
+  g.lineWidth = w; g.strokeStyle = "#3a3f47"; g.strokeRect(w / 2, w / 2, 18 * T - w, 32 * T - w);
+  g.lineWidth = 1; g.strokeStyle = "rgba(255,255,255,.14)"; g.strokeRect(w + 0.5, w + 0.5, 18 * T - 2 * w - 1, 32 * T - 2 * w - 1);
+}
+function drawWater(now) {
+  if (!riverPath) return;
+  ctx.save(); ctx.clip(riverPath);
+  const y0 = 15 * T, h = 2 * T, grd = ctx.createLinearGradient(0, y0, 0, y0 + h);
+  grd.addColorStop(0, "#3c92da"); grd.addColorStop(1, "#2361a3");
+  ctx.fillStyle = grd; ctx.fillRect(0, y0, 18 * T, h);
+  ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.lineWidth = Math.max(1, T * 0.06);
+  for (let k = 0; k < 4; k++) {
+    const yy = y0 + h * (0.18 + 0.21 * k), ph = now / 900 + k * 1.7;
+    ctx.beginPath();
+    for (let xx = 0; xx <= 18 * T + T / 3; xx += T / 3) { const yv = yy + Math.sin(xx / T * 1.3 + ph) * T * 0.08; if (xx === 0) ctx.moveTo(xx, yv); else ctx.lineTo(xx, yv); }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function hpBar(x, y, w, hp, max, shield, mine) {
+  if (max <= 0) return;
+  const h = Math.max(3, T * 0.16);
+  ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(x - w / 2 - 1, y - 1, w + 2, h + 2);
+  ctx.fillStyle = mine ? "#5aa0ff" : "#ff6b6e"; ctx.fillRect(x - w / 2, y, w * Math.max(0, hp / max), h);
+  if (shield > 0) { ctx.fillStyle = "#d0d6de"; ctx.fillRect(x - w / 2, y - h - 1, w, h * 0.8); }
+}
+function emoji(ch, x, y, size, alpha) {
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  if (!EMOJI_OK) {
+    if (/[^\x00-\x7F]/.test(ch)) return;                    // decorative emoji: nothing to draw without the font
+    ctx.globalAlpha = alpha; ctx.font = "800 " + Math.round(size * 0.62) + "px system-ui, sans-serif";
+    ctx.lineWidth = Math.max(2, size * 0.12); ctx.strokeStyle = "rgba(0,0,0,.7)"; ctx.strokeText(ch, x, y + 1);
+    ctx.fillStyle = "#fff"; ctx.fillText(ch, x, y + 1); ctx.globalAlpha = 1; return;
+  }
+  ctx.globalAlpha = alpha; ctx.font = Math.round(size) + "px " + EMOJI_FONT; ctx.fillText(ch, x, y + size * 0.05); ctx.globalAlpha = 1;
+}
+function label(text, x, y, mine) {
+  ctx.font = "600 " + Math.max(9, Math.round(T * 0.42)) + "px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.75)"; ctx.strokeText(text, x, y); ctx.fillStyle = mine ? "#cfe0ff" : "#ffd0d1"; ctx.fillText(text, x, y);
+}
+function drawCracks(x, y, half, id, frac) {
+  ctx.strokeStyle = "rgba(35,35,35,.7)"; ctx.lineWidth = Math.max(1, T * 0.07);
+  const n = frac < 0.34 ? 4 : 2;
+  for (let k = 0; k < n; k++) {
+    let px = x + (hash01(id * 7 + k) - 0.5) * half * 1.5, py = y - half + hash01(id * 13 + k) * half * 0.5;
+    ctx.beginPath(); ctx.moveTo(px, py);
+    for (let s = 0; s < 4; s++) { px += (hash01(id * 3 + k * 11 + s) - 0.5) * half * 0.55; py += half * 0.3; ctx.lineTo(px, py); }
+    ctx.stroke();
+  }
+}
+function towerBox(x, y, half) { ctx.beginPath(); ctx.roundRect(x - half, y - half, 2 * half, 2 * half, T * 0.35); }
+function drawTower(e, now) {
+  let tw = null; for (const t of S.towers) if ((t.side === "me") === !!e[E.mine] && t.idx === e[E.tidx]) tw = t;
+  const king = e[E.unit] === "KingTower", mine = !!e[E.mine], half = (king ? 1.9 : 1.4) * T, x = P(e[E.x]), y = P(e[E.y]);
+  const key = (mine ? "me" : "foe") + e[E.tidx], hp = e[E.hp], max = e[E.maxhp] || 1;
+  let fx = towerFx[key];
+  if (!fx) fx = towerFx[key] = {shown: hp, trail: hp, last: hp, flash: -1e9, hitAt: -1e9};
+  if (hp < fx.last) { fx.flash = now; fx.hitAt = now; }
+  fx.last = hp; fx.shown += (hp - fx.shown) * 0.35;
+  if (now - fx.hitAt > 450) fx.trail += (hp - fx.trail) * 0.08;
+  if (fx.trail < fx.shown) fx.trail = fx.shown;
+  ctx.fillStyle = "rgba(0,0,0,.30)"; ctx.beginPath(); ctx.ellipse(x + T * 0.15, y + half * 0.9, half * 1.02, half * 0.35, 0, 0, 7); ctx.fill();
+  const body = ctx.createLinearGradient(0, y - half, 0, y + half); body.addColorStop(0, "#d5dade"); body.addColorStop(1, "#7c848b");
+  ctx.fillStyle = body; ctx.strokeStyle = "#373d44"; ctx.lineWidth = 2; towerBox(x, y, half); ctx.fill(); ctx.stroke();
+  ctx.save(); towerBox(x, y, half); ctx.clip();                          // stone courses
+  ctx.strokeStyle = "rgba(55,61,68,.35)"; ctx.lineWidth = 1;
+  const bh = half / 3;
+  for (let r = 0; r < 6; r++) {
+    const yy = y - half + r * bh;
+    ctx.beginPath(); ctx.moveTo(x - half, yy); ctx.lineTo(x + half, yy); ctx.stroke();
+    for (let c = 0; c < 5; c++) { const xx = x - half + (c + (r % 2) * 0.5) * (half / 2); ctx.beginPath(); ctx.moveTo(xx, yy); ctx.lineTo(xx, yy + bh); ctx.stroke(); }
+  }
+  if (hp / max < 0.67) drawCracks(x, y, half, e[E.id] + 1, hp / max);
+  ctx.restore();
+  const inner = half * 0.62, roof = ctx.createLinearGradient(0, y - inner, 0, y + inner);
+  roof.addColorStop(0, mine ? "#64a0ff" : "#ff7275"); roof.addColorStop(1, mine ? "#1d4b98" : "#9a1e24");
+  ctx.fillStyle = roof; ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(x - inner, y - inner, 2 * inner, 2 * inner, T * 0.2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#c3c9ce"; ctx.strokeStyle = "#373d44"; ctx.lineWidth = 1;
+  const mw = T * 0.3;
+  for (let k = -1; k <= 1; k++) { ctx.fillRect(x + k * half * 0.62 - mw / 2, y - half - mw * 0.5, mw, mw * 0.8); ctx.strokeRect(x + k * half * 0.62 - mw / 2, y - half - mw * 0.5, mw, mw * 0.8); }
+  drawEmblem(king, x, y, inner);
+  if (now - fx.flash < 180) { ctx.fillStyle = "rgba(255,70,70," + (0.45 * (1 - (now - fx.flash) / 180)) + ")"; towerBox(x, y, half); ctx.fill(); }
+  if (king && tw && !tw.active) {                              // the sleeping King
+    ctx.font = "800 " + Math.round(T * 0.5) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.7)"; ctx.strokeText("z z", x + half * 0.7, y - half * 0.72);
+    ctx.fillStyle = "#e9eef3"; ctx.fillText("z z", x + half * 0.7, y - half * 0.72);
+  }
+  // the HP bar, on the side away from the river, with the number on it
+  const bw = 2 * half + T * 0.4, bh2 = Math.max(11, T * 0.55), bx = x - bw / 2;
+  const by = mine ? y + half + T * 0.18 : y - half - T * 0.18 - bh2;
+  ctx.fillStyle = "rgba(8,12,16,.88)"; ctx.beginPath(); ctx.roundRect(bx - 2, by - 2, bw + 4, bh2 + 4, (bh2 + 4) / 2); ctx.fill();
+  ctx.save(); ctx.beginPath(); ctx.roundRect(bx, by, bw, bh2, bh2 / 2); ctx.clip();
+  ctx.fillStyle = "#2a3038"; ctx.fillRect(bx, by, bw, bh2);
+  ctx.fillStyle = "rgba(255,225,150,.9)"; ctx.fillRect(bx, by, bw * Math.max(0, fx.trail / max), bh2);     // damage just taken
+  const hg = ctx.createLinearGradient(0, by, 0, by + bh2);
+  hg.addColorStop(0, mine ? "#8cbcff" : "#ff9a9c"); hg.addColorStop(1, mine ? "#2b68d8" : "#cf353b");
+  ctx.fillStyle = hg; ctx.fillRect(bx, by, bw * Math.max(0, fx.shown / max), bh2);
+  ctx.restore();
+  ctx.font = "800 " + Math.round(bh2 * 0.82) + "px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.9)"; ctx.strokeText(String(hp), x, by + bh2 / 2 + 1); ctx.fillStyle = "#fff"; ctx.fillText(String(hp), x, by + bh2 / 2 + 1);
+}
+function drawEmblem(king, x, y, inner) {
+  ctx.fillStyle = "#f2c94c"; ctx.strokeStyle = "rgba(60,40,0,.8)"; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  if (king) {                                                  // a crown
+    const w = inner * 0.95, h = inner * 0.62, b = y + h * 0.5, t = y - h * 0.5;
+    ctx.moveTo(x - w / 2, b); ctx.lineTo(x - w / 2, t); ctx.lineTo(x - w / 4, y - h * 0.05); ctx.lineTo(x, t - h * 0.12);
+    ctx.lineTo(x + w / 4, y - h * 0.05); ctx.lineTo(x + w / 2, t); ctx.lineTo(x + w / 2, b); ctx.closePath();
+  } else {                                                     // a pennant on a pole
+    const h = inner * 0.9;
+    ctx.moveTo(x - h * 0.25, y + h / 2); ctx.lineTo(x - h * 0.25, y - h / 2); ctx.lineTo(x + h * 0.4, y - h * 0.28); ctx.lineTo(x - h * 0.25, y - h * 0.06);
+  }
+  ctx.fill(); ctx.stroke();
+}
+function drawRubble(key, p) {
+  const king = key.charAt(key.length - 1) === "0", half = (king ? 1.9 : 1.4) * T, x = P(p[0]), y = P(p[1]);
+  ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.beginPath(); ctx.ellipse(x, y + half * 0.4, half, half * 0.45, 0, 0, 7); ctx.fill();
+  for (let k = 0; k < 10; k++) {
+    ctx.fillStyle = k % 3 === 0 ? "#6f777e" : k % 3 === 1 ? "#959da3" : "#b3b9be";
+    ctx.beginPath(); ctx.arc(x + (hash01(k * 5.1 + p[0]) - 0.5) * half * 1.5, y + (hash01(k * 9.7 + p[1]) - 0.5) * half * 1.1, T * (0.18 + 0.22 * hash01(k * 3.3 + p[1])), 0, 7); ctx.fill();
+  }
+  emoji("💥", x, y, T * 0.9, 0.45);
+}
+function drawUnit(tr, now) {
+  const e = tr.e, c = posOf(tr, now), x = P(c[0]), y = P(c[1]), mine = !!e[E.mine], fly = !!e[E.fly];
+  const r = Math.max(P(e[E.r] || 400), T * 0.36), building = e[E.kind] === "building";
+  let fx = unitFx.get(e[E.id]);
+  if (!fx) { fx = {last: e[E.hp], flash: -1e9, born: now}; unitFx.set(e[E.id], fx); }
+  if (e[E.hp] < fx.last) fx.flash = now;
+  fx.last = e[E.hp];
+  let a = 1;
+  if (e[E.dep]) a *= 0.55 + 0.25 * Math.sin(now / 90);
+  if (e[E.hid] || e[E.bur]) a *= 0.35;
+  const lift = fly ? T * 0.45 : 0, cy = y - lift, age = now - fx.born;
+  if (age < 450) { ctx.strokeStyle = (mine ? "rgba(140,190,255," : "rgba(255,150,150,") + (1 - age / 450) + ")"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r * (1 + age / 280), 0, 7); ctx.stroke(); }
+  ctx.globalAlpha = (fly ? 0.3 : 0.25) * a; ctx.fillStyle = "#000"; ctx.beginPath(); ctx.ellipse(x + (fly ? 0 : r * 0.12), y + r * (fly ? 0.35 : 0.55), r * 0.9, r * 0.42, 0, 0, 7); ctx.fill();
+  ctx.globalAlpha = a;
+  const grd = ctx.createRadialGradient(x - r * 0.35, cy - r * 0.35, r * 0.15, x, cy, r * 1.05);
+  grd.addColorStop(0, mine ? "#9cc3ff" : "#ffadaf"); grd.addColorStop(1, mine ? "#1c53bd" : "#b5282e");
+  ctx.fillStyle = grd; ctx.strokeStyle = e[E.stun] ? "#7fe3ff" : "rgba(255,255,255,.9)"; ctx.lineWidth = e[E.stun] ? 3 : 1.6;
+  ctx.beginPath(); if (building) ctx.roundRect(x - r, cy - r, 2 * r, 2 * r, r * 0.3); else ctx.arc(x, cy, r, 0, 7);
+  ctx.fill(); ctx.stroke();
+  if (now - fx.flash < 130) { ctx.fillStyle = "rgba(255,255,255," + (0.55 * (1 - (now - fx.flash) / 130)) + ")"; ctx.beginPath(); if (building) ctx.roundRect(x - r, cy - r, 2 * r, 2 * r, r * 0.3); else ctx.arc(x, cy, r, 0, 7); ctx.fill(); }
+  if (e[E.slow]) { ctx.fillStyle = "#9be7ff"; ctx.beginPath(); ctx.arc(x + r * 0.8, cy - r * 0.8, Math.max(2, r * 0.22), 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  emoji(unitIcon(e[E.unit], e[E.card]), x, cy, r * 1.4, a);
+  if ((!e[E.dep] && e[E.hp] < e[E.maxhp]) || e[E.shield] > 0 || !swarm(e[E.card])) hpBar(x, cy - r - T * 0.32, Math.max(2 * r, T * 0.8), e[E.hp], e[E.maxhp], e[E.shield], mine);
+  if (showLabels && !swarm(e[E.card])) label(unitName(e[E.unit], e[E.card]), x, cy + r + 2, mine);
+}
+function drawAttackLines(now) {
+  ctx.lineWidth = Math.max(1, T * 0.07);
+  for (const tr of tracks.values()) {
+    const e = tr.e; if (!e[E.atk] || e[E.tgt] < 0 || e[E.kind] === "tower") continue;
+    const t = tracks.get(e[E.tgt]); if (!t) continue;
+    const a = posOf(tr, now), b = posOf(t, now);
+    ctx.strokeStyle = e[E.mine] ? "rgba(140,190,255,.55)" : "rgba(255,150,150,.55)";
+    ctx.beginPath(); ctx.moveTo(P(a[0]), P(a[1])); ctx.lineTo(P(b[0]), P(b[1])); ctx.stroke();
+  }
+}
+function effectStyle(name) {
+  if (name.indexOf("Poison") >= 0) return ["rgba(120,220,80,.28)", "🧪"];
+  if (name.indexOf("Freeze") >= 0 || name.indexOf("SlowDown") >= 0) return ["rgba(140,220,255,.30)", "❄️"];
+  if (name.indexOf("Zap") >= 0) return ["rgba(255,240,120,.35)", "✨"];
+  if (name.indexOf("Lighn") >= 0 || name.indexOf("Lightning") >= 0) return ["rgba(255,240,120,.30)", "🌩️"];
+  if (name.indexOf("Earthquake") >= 0) return ["rgba(150,100,50,.32)", "🌋"];
+  if (name.indexOf("Arrows") >= 0) return ["rgba(230,230,230,.28)", "🏹"];
+  return ["rgba(255,255,255,.22)", ""];
+}
+function drawEffects() {
+  for (const f of S.effs) {
+    const mine = f[1], name = f[2], x = f[5], y = f[6], r = f[7], ry = f[8], st = effectStyle(name);
+    ctx.fillStyle = st[0]; ctx.strokeStyle = mine ? "#7fb0ff" : "#ff8a8d"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); if (ry > 0) ctx.ellipse(P(x), P(y), P(r), P(ry), 0, 0, 7); else ctx.arc(P(x), P(y), Math.max(P(r), T * 0.3), 0, 7);
+    ctx.fill(); ctx.stroke();
+    if (st[1]) emoji(st[1], P(x), P(y), T * 0.9, 0.85);
+  }
+}
+function drawProjectiles(now) {
+  for (const tr of ptracks.values()) {
+    const p = tr.p, c = posOf(tr, now), mine = !!p[1], name = p[2];
+    let ic = null; for (const kv of PROJ_ICON) if (name.indexOf(kv[0]) >= 0) { ic = kv[1]; break; }
+    tr.hist = (tr.hist || []).concat([[c[0], c[1]]]).slice(-5);
+    if (tr.hist.length > 1) {
+      ctx.strokeStyle = ic ? "rgba(255,200,120,.45)" : (mine ? "rgba(200,225,255,.6)" : "rgba(255,210,210,.6)"); ctx.lineWidth = Math.max(1.5, T * 0.09);
+      ctx.beginPath(); ctx.moveTo(P(tr.hist[0][0]), P(tr.hist[0][1])); for (const h of tr.hist) ctx.lineTo(P(h[0]), P(h[1])); ctx.stroke();
+    }
+    if (ic) {
+      ctx.setLineDash([5, 5]); ctx.strokeStyle = mine ? "rgba(140,190,255,.6)" : "rgba(255,150,150,.6)"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(P(c[0]), P(c[1])); ctx.lineTo(P(p[6]), P(p[7])); ctx.stroke(); ctx.setLineDash([]);
+      if (p[8] > 0) { ctx.beginPath(); ctx.arc(P(p[6]), P(p[7]), P(p[8]), 0, 7); ctx.stroke(); }
+      if (EMOJI_OK) emoji(ic, P(c[0]), P(c[1]), T * 1.1, 1);
+      else { ctx.fillStyle = "#ffb347"; ctx.strokeStyle = "#7a3d00"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(P(c[0]), P(c[1]), T * 0.35, 0, 7); ctx.fill(); ctx.stroke(); }
+    } else {
+      ctx.fillStyle = mine ? "#cfe0ff" : "#ffd0d1"; ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(P(c[0]), P(c[1]), Math.max(2, T * 0.13), 0, 7); ctx.fill(); ctx.stroke();
+    }
+  }
+}
+function drawPopups(now) {
+  popups = popups.filter(p => now - p.t0 < 1600);
+  for (const p of popups) {
+    const k = (now - p.t0) / 1600;
+    ctx.globalAlpha = 1 - k; ctx.font = "800 " + Math.round(T * 0.75) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.8)"; const y = P(p.y) - T * (1 + 1.4 * k);
+    ctx.strokeText(p.text, P(p.x), y); ctx.fillStyle = p.mine ? "#9cc4ff" : "#ff9fa1"; ctx.fillText(p.text, P(p.x), y); ctx.globalAlpha = 1;
+  }
+}
+function drawSelection() {
+  if (selected === null || !S || KIND !== "match") return;
+  const slot = S.hand.indexOf(selected);
+  if (slot < 0) return;
+  ctx.fillStyle = "rgba(255,255,255,.16)";
+  for (let ty = 0; ty < 32; ty++) for (let tx = 0; tx < 18; tx++) if (legal(slot, tx, ty)) ctx.fillRect(tx * T, ty * T, T, T);
+  if (!hover) return;
+  const at = snapTile(slot, hover), k = cardsById[selected];
+  if (!at) { ctx.strokeStyle = "#ff5a5f"; ctx.lineWidth = 2; ctx.strokeRect(hover[0] * T + 1, hover[1] * T + 1, T - 2, T - 2); return; }
+  const cx = (at[0] + 0.5) * T, cy = (at[1] + 0.5) * T;
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(at[0] * T + 1, at[1] * T + 1, T - 2, T - 2);
+  if (k.kind === "spell" && k.radius > 0) { ctx.fillStyle = "rgba(255,255,255,.18)"; ctx.beginPath(); ctx.arc(cx, cy, P(k.radius), 0, 7); ctx.fill(); ctx.stroke(); }
+  emoji(cardIcon(selected), cx, cy, T * (drag && drag.moving ? 1.6 : 1.1), 0.65);
+}
+function drawPending(now) {                            // sent plays, drawn at once where they will land
+  pending = pending.filter(p => now - p.t0 < 3000);
+  for (const p of pending) {
+    const cx = (p.tx + 0.5) * T, cy = (p.ty + 0.5) * T;
+    emoji(cardIcon(p.card), cx, cy, T * 1.1, 0.8);
+    ctx.strokeStyle = "rgba(255,255,255,.95)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, T * (0.62 + 0.12 * Math.sin((now - p.t0) / 60)), 0, 7); ctx.stroke();
+  }
+}
+function drawAdvice(now) {
+  if (!S.advisor || !S.advice || !S.advice.cards.length || KIND !== "match") return;
+  const a = S.advice.cards[0], cx = (a.tx + 0.5) * T, cy = (a.ty + 0.5) * T, pulse = 1 + 0.15 * Math.sin(now / 160);
+  ctx.strokeStyle = "#f2c94c"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(cx, cy, T * 0.75 * pulse, 0, 7); ctx.stroke();
+  emoji(cardIcon(a.card), cx, cy, T * 0.9, 0.75);
+  ctx.font = "800 " + Math.round(T * 0.5) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+  ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.8)"; const t = "💡 " + Math.round(100 * a.p) + "%";
+  ctx.strokeText(t, cx, cy - T * 0.8); ctx.fillStyle = "#f2c94c"; ctx.fillText(t, cx, cy - T * 0.8);
+}
+function drawQueued() {
+  for (const q of (S.queued || [])) { if (q.pid && pending.some(p => p.id === q.pid)) continue; emoji(cardIcon(q.card), (q.tx + 0.5) * T, (q.ty + 0.5) * T, T, 0.55);
+    ctx.strokeStyle = "#fff"; ctx.setLineDash([3, 3]); ctx.strokeRect(q.tx * T + 1, q.ty * T + 1, T - 2, T - 2); ctx.setLineDash([]); }
+}
+function frame() {
+  requestAnimationFrame(frame);
+  if (!META || !S || !$("game").classList.contains("on")) return;
+  const now = performance.now(), seat = S.seat === 1 ? 1 : 0;
+  buildBackground(seat);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(BG, 0, 0);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  drawWater(now);
+  drawSelection();
+  drawEffects();
+  for (const t of S.towers) if (!t.alive) drawRubble(t.side + t.idx, [t.x, t.y]);
+  const ground = [], air = [];
+  for (const tr of tracks.values()) { if (tr.e[E.kind] === "tower") drawTower(tr.e, now); else if (tr.e[E.fly]) air.push(tr); else ground.push(tr); }
+  ground.sort((a, b) => a.e[E.y] - b.e[E.y]);
+  for (const tr of ground) drawUnit(tr, now);
+  drawAttackLines(now);
+  drawProjectiles(now);
+  for (const tr of air) drawUnit(tr, now);
+  dying = dying.filter(d => now - d.t0 < 300);
+  for (const d of dying) if (d.e[E.kind] !== "tower") {
+    const k = (now - d.t0) / 300;
+    if (EMOJI_OK) emoji("💨", P(d.x), P(d.y), T * 0.9, 1 - k);
+    else { ctx.strokeStyle = "rgba(230,230,230," + (0.8 * (1 - k)) + ")"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(P(d.x), P(d.y), T * (0.3 + 0.4 * k), 0, 7); ctx.stroke(); }
+  }
+  drawAdvice(now);
+  drawQueued();
+  if (KIND === "match") drawPending(now);
+  drawPopups(now);
+  if (panelsDirty && now - panelsAt > 80) { panelsDirty = false; panelsAt = now; updatePanels(); }
+}
+
+// ======================================================================= input
+// Two ways to play, as in the real game: tap a card then a tile, or drag a card onto the board (works on phones:
+// the card keeps the touch, and the tile is found from the finger's position). A tap or drop a little off the
+// allowed area (a tile over the river, a tower's edge) lands on the nearest allowed tile within 2 tiles, as the
+// preview shows; farther away it is refused.
+let handKey = "", drag = null;
+function tileAtXY(x, y) { const r = cv.getBoundingClientRect(), tx = Math.floor((x - r.left) / T), ty = Math.floor((y - r.top) / T); return tx >= 0 && tx < 18 && ty >= 0 && ty < 32 ? [tx, ty] : null; }
+function tileAt(ev) { return tileAtXY(ev.clientX, ev.clientY); }
+function snapTile(slot, t) {
+  if (!t || slot < 0) return null;
+  if (legal(slot, t[0], t[1])) return t;
+  let best = null, bd = 1e9;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const x = t[0] + dx, y = t[1] + dy, d = dx * dx + dy * dy - (dy > 0 ? 0.01 : 0);   // ties: toward your own side
+    if (dx * dx + dy * dy > 4.5 || x < 0 || x >= 18 || y < 0 || y >= 32 || !legal(slot, x, y)) continue;
+    if (d < bd) { bd = d; best = [x, y]; }
+  }
+  return best;
+}
+function tryPlay(card, t) {
+  if (!S || S.over || KIND !== "match" || !t) return false;
+  const slot = S.hand.indexOf(card), k = cardsById[card];
+  if (slot < 0) return false;
+  if (pending.some(p => p.card === card)) { toast(k.name + " is already on its way"); return false; }
+  if (S.lockout > 0) { toast("Wait for the deploy lockout"); return false; }
+  if (S.elixir - pendingCost() + 1e-9 < k.cost) { toast("Not enough elixir"); return false; }
+  const at = snapTile(slot, t);
+  if (!at) { toast("You can't place " + k.name + " there"); return false; }
+  sendPlay(card, at[0], at[1]);
+  return true;
+}
+function bindCard(d, i) {
+  d.addEventListener("pointerdown", ev => {
+    if (!S || S.over || KIND !== "match") return;
+    ev.preventDefault();
+    drag = {card: S.hand[i], x0: ev.clientX, y0: ev.clientY, id: ev.pointerId, moving: false, prev: selected};
+    try { d.setPointerCapture(ev.pointerId); } catch (e) {}
+    selected = drag.card; updatePanels();                       // feedback on touch-down
+  });
+  d.addEventListener("pointermove", ev => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    if (!drag.moving && Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0) > 8) drag.moving = true;
+    if (drag.moving) hover = tileAtXY(ev.clientX, ev.clientY);
+  });
+  const end = ev => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    const dr = drag; drag = null;
+    try { d.releasePointerCapture(ev.pointerId); } catch (e) {}
+    if (ev.type === "pointercancel") selected = dr.prev;
+    else if (dr.moving) {
+      const t = tileAtXY(ev.clientX, ev.clientY);
+      if (!t || tryPlay(dr.card, t)) selected = null;            // played, or dropped off the board: nothing selected
+    } else selected = dr.prev === dr.card ? null : dr.card;      // a tap toggles the selection
+    hover = null;
+    updatePanels();
+  };
+  d.addEventListener("pointerup", end);
+  d.addEventListener("pointercancel", end);
+}
+cv.addEventListener("pointermove", ev => { if (!drag) hover = tileAt(ev); });
+cv.addEventListener("pointerleave", () => { if (!drag) hover = null; });
+cv.addEventListener("pointerup", ev => {
+  if (drag) return;
+  const t = tileAt(ev);
+  if (ev.pointerType !== "mouse") hover = null; else hover = t;
+  if (!t || selected === null || !S || KIND !== "match") return;
+  if (tryPlay(selected, t)) { selected = null; updatePanels(); }
+});
+document.addEventListener("keydown", ev => {
+  if (!$("game").classList.contains("on")) return;
+  const tag = ev.target.tagName; if (tag === "INPUT" || tag === "SELECT") return;
+  if (ev.key >= "1" && ev.key <= "4") selectSlot(+ev.key - 1);
+  else if (ev.key === "Escape") { selected = null; if (KIND === "match") post("/api/cancel", {sid: SID}).catch(() => {}); updatePanels(); }
+  else if (ev.key === " ") { ev.preventDefault(); if (S && KIND !== "spectate") post("/api/control", {sid: SID, paused: !S.paused}).catch(e => toast(e.message)); }
+  else if (ev.key === "l" || ev.key === "L") showLabels = !showLabels;
+});
+$("pausebtn").onclick = () => { if (S) post("/api/control", {sid: SID, paused: !S.paused}).catch(e => toast(e.message)); };
+$("speedsel").onchange = ev => { post("/api/control", {sid: SID, speed: +ev.target.value}).catch(e => toast(e.message)); if (KIND === "match" && +ev.target.value < 1) toast("Below 1× the match is unranked."); };
+$("labelsbtn").onclick = () => { showLabels = !showLabels; };
+let seeking = false;
+$("seek").addEventListener("input", () => { seeking = true; $("rptime").textContent = fmtElapsed(+$("seek").value); });
+$("seek").addEventListener("change", async () => { try { await post("/api/control", {sid: SID, seek: +$("seek").value}); } catch (e) { toast(e.message); } seeking = false; resetBoard(); });
+
+// ---------------------------------------------------------------- replay -> video (WebM, recorded in the browser)
+let recorder = null, chunks = [];
+$("recbtn").onclick = () => {
+  if (recorder && recorder.state === "recording") { recorder.stop(); return; }
+  if (!window.MediaRecorder || !cv.captureStream) { toast("This browser cannot record video."); return; }
+  chunks = [];
+  const types = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  let type = ""; for (const t of types) if (MediaRecorder.isTypeSupported(t)) { type = t; break; }
+  recorder = new MediaRecorder(cv.captureStream(30), type ? {mimeType: type} : undefined);
+  recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    $("recbtn").textContent = "⏺ Video";
+    const blob = new Blob(chunks, {type: "video/webm"}), a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "pufferroyale_" + (S && S.match_id ? S.match_id : "replay") + ".webm";
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+  };
+  recorder.start(1000); $("recbtn").textContent = "⏹ Stop & save";
+  toast("Recording: it saves when you press stop or the replay ends.");
+};
+setInterval(() => { if (recorder && recorder.state === "recording" && S && S.kind === "replay" && S.over) recorder.stop(); }, 500);
+
+window.addEventListener("beforeunload", () => { if (SID && KIND === "replay") navigator.sendBeacon && navigator.sendBeacon(withTok("/api/leave"), new Blob([JSON.stringify({sid: SID})], {type: "application/json"})); });
+setPhone();
+requestAnimationFrame(frame);
+boot();
+</script>
+</body>
+</html>

@@ -63,6 +63,19 @@ v0.5 (SPEC §19.7):
                               one log call per history.jsonl record at step = global step, with PuffeRL's
                               environment/* stats (per-card play rates, ...). Without --wandb, wandb is
                               never imported. These flags are not stored with the run.
+    --log-interval N          one wandb call per N epochs instead (D99): losses and environment/* stats
+                              averaged over the N epochs, results summed (games; score = total / games),
+                              epoch / global_step / sps / pool_size of the last one; history.jsonl keeps
+                              every epoch. Default 1 (one call per record, unchanged).
+    --card-floor EPS --card-floor-steps N
+                              card-probability floor (D100, conditional head): every legal hand slot keeps
+                              at least eps of the learner's card distribution (pufferroyale.torch
+                              Policy.enable_card_floor), eps = EPS * max(0, 1 - step / N) for the epoch that
+                              starts at learner step `step` (N = 0: constant). Set on the learner and on the
+                              MMD reference before every epoch; snapshots, checkpoints and evaluations play
+                              without it. history.jsonl / wandb get card_floor, wandb also
+                              cards/below_floor = the number of cards whose play rate is below EPS.
+                              Default 0 (off: the policy runs exactly as before).
 
 Any PuffeRL / env / policy key of pufferroyale/config/royale.ini can also be overridden as
 --train.key value, --env.key value, --policy.key value (e.g. --train.learning-rate 1e-4,
@@ -94,7 +107,10 @@ DEFAULTS = dict(total_timesteps=1_000_000, device="cpu", num_envs=16, anchors="b
                 frame_skip=None, bptt_horizon=None, batch_size=None, minibatch_size=None, learning_rate=None,
                 rnn=False, opponent_greedy=False, anneal_lr=False, run_id=None, print_interval=1,
                 shaping_anneal_frac=0.0, init_from=None, early_stop_score=None, early_stop_window=2000,
-                shaping_anneal_steps=None)      # N of SPEC §19.10.1: set when the run is created (not a flag)
+                shaping_anneal_steps=None,      # N of SPEC §19.10.1: set when the run is created (not a flag)
+                env_threads=0, fast_opponents=False, cuda_graphs=False, eval_export_interval=0,   # D90 / D91
+                log_interval=1,                                                                  # D99
+                card_floor=0.0, card_floor_steps=0)                                              # D100
 # PufferLib logging flags: honoured for the current invocation, never stored with the run (a resumed run
 # logs only when asked to again); value = number of arguments the flag takes
 LOGGING_FLAGS = {"--wandb": 0, "--no-model-upload": 0, "--wandb-project": 1, "--wandb-group": 1, "--tag": 1,
@@ -142,7 +158,26 @@ def make_parser():
                                                            "its last --early-stop-window matches vs every anchor is "
                                                            ">= this (default: off)")
     ap.add_argument("--early-stop-window", type=int, help="matches per anchor for --early-stop-score (default 2000)")
+    ap.add_argument("--env-threads", type=int, help="step the matches from N threads (pufferroyale.fast_league; "
+                                                    "env results bit-identical; 0/1 = serial, the default)")
+    ap.add_argument("--fast-opponents", action=argparse.BooleanOptionalAction, default=None,
+                    help="CUDA only: observations copied to the device once per step, policy opponents sampled "
+                         "on the device, frozen checkpoints in one vmapped forward (pufferroyale.fast_league: same "
+                         "distribution, a different random stream than the CPU path)")
+    ap.add_argument("--cuda-graphs", action=argparse.BooleanOptionalAction, default=None,
+                    help="CUDA only: replay the no-grad policy forwards from CUDA graphs (pufferroyale.fast_league; "
+                         "--no-cuda-graphs turns it off on --resume)")
+    ap.add_argument("--eval-export-interval", type=int,
+                    help="every N epochs write the learner's weights to <run>/eval_ckpt/ for hpc/eval_watch.py "
+                         "(0 = off, the default)")
     ap.add_argument("--print-interval", type=int, help="print a progress line every N epochs (default 1)")
+    ap.add_argument("--log-interval", type=int, help="with --wandb: one log call per N epochs, losses / environment "
+                                                       "stats averaged and results summed over them (default 1)")
+    ap.add_argument("--card-floor", type=float, help="every legal hand slot keeps at least this probability of the "
+                                                     "learner's card choice (D100; < 0.25, conditional head; "
+                                                     "default 0 = off)")
+    ap.add_argument("--card-floor-steps", type=int, help="fade --card-floor linearly to 0 over the first N learner "
+                                                         "steps (default 0 = constant)")
     ap.add_argument("--dashboard", action="store_true", help="show PuffeRL's dashboard instead of progress lines")
     ap.add_argument("--summary-json", help="also write the final JSON summary here")
     return ap
@@ -323,19 +358,176 @@ def make_wandb(ini, config, load_id=None):
     return WandbLogger(args, load_id=load_id)
 
 
-def wandb_record(rec, puffer_logs=None):
-    """One flat numeric dict for wandb from a history.jsonl record (+ PuffeRL's environment/* stats)."""
+def check_card_floor(a):
+    """D100: --card-floor in [0, 0.25), --card-floor-steps >= 0."""
+    eps, n = a["card_floor"], a["card_floor_steps"]
+    if eps is None or not math.isfinite(float(eps)) or not 0.0 <= float(eps) < 0.25:
+        raise SystemExit(f"--card-floor must lie in [0, 0.25), got {eps!r}")
+    if n is None or int(n) < 0:
+        raise SystemExit(f"--card-floor-steps must be >= 0, got {n!r}")
+
+
+def card_floor_at(a, global_step):
+    """D100: the floor for the epoch that starts at learner step `global_step`: --card-floor, faded
+    linearly to 0 over the first --card-floor-steps learner steps (0 = constant)."""
+    eps, n = float(a.get("card_floor") or 0.0), int(a.get("card_floor_steps") or 0)
+    if eps <= 0.0 or n <= 0:
+        return max(eps, 0.0)
+    return eps * max(0.0, 1.0 - int(global_step) / n)
+
+
+PLAY_RATE = "environment/cards/play_rate/"
+ENV_LEAGUE = "environment/league/"
+#: the league/score_vs_snapshots_age_<label> windows: a snapshot's age = learner steps since it was taken
+SNAPSHOT_AGE_BINS = ((0, 16e6, "0-16M"), (16e6, 64e6, "16-64M"), (64e6, 200e6, "64-200M"), (200e6, math.inf, "200M+"))
+
+
+def snapshot_epoch(spec):
+    """The epoch of a pool snapshot spec ("ckpt:<dir>/snap_<epoch>.pt"), else None."""
+    base = os.path.basename(spec[5:]) if isinstance(spec, str) and spec.startswith("ckpt:") else ""
+    if base.startswith("snap_") and base.endswith(".pt") and base[5:-3].isdigit():
+        return int(base[5:-3])
+    return None
+
+
+def results_keys(spec, league_sections=False):
+    """(score key, games key) under which wandb_record logs the results against opponent `spec`: with
+    league_sections, "self" and pool snapshots in the league sections; everything else under results/."""
+    e = snapshot_epoch(spec)
+    if league_sections and spec == "self":
+        return "league/score_vs_self", "league/games_vs_self"
+    if league_sections and e is not None:
+        return f"league_snapshots/snap_{e}/score", f"league_snapshots/snap_{e}/games"
+    return f"results/{short(spec)}/score", f"results/{short(spec)}/games"
+
+
+def wandb_record(rec, puffer_logs=None, floor_ref=0.0, league_sections=False):
+    """One flat numeric dict for wandb from a history.jsonl record (+ PuffeRL's environment/* stats). With
+    floor_ref > 0 (D100) also cards/below_floor: the number of cards whose play rate is below floor_ref.
+
+    league_sections (league_train.py, 2026-10-20; best_response.py keeps the plain layout): the league's
+    matches get their own wandb sections instead of environment/league/* and results/<spec>/*:
+    league/ = score_vs_self, score_vs_snapshots (all snapshots, games-weighted), score_vs_snapshots_age_<bin>
+    (SNAPSHOT_AGE_BINS), the games behind each, pool_p_median / min / max (the running PFSP score p over the
+    snapshots played in this record) and the pool counters (pool_size, episodes, snapshots); league_snapshots/
+    = per snapshot snap_<epoch>/score, /games and /p, only for snapshots played in this record."""
     out = {"epoch": rec["epoch"], "global_step": rec["global_step"], "sps": rec["sps"], "pool_size": rec["pool_size"]}
+    if "card_floor" in rec:
+        out["card_floor"] = rec["card_floor"]
     for k, v in rec["losses"].items():
         if v is not None:
             out[f"losses/{k}"] = v
+    if not league_sections:
+        for spec, r in rec["results"].items():
+            out[f"results/{short(spec)}/score"] = r["score"]
+            out[f"results/{short(spec)}/games"] = r["games"]
+        for k, v in (puffer_logs or {}).items():
+            if k.startswith("environment/") and isinstance(v, (int, float)) and math.isfinite(float(v)):
+                out[k] = float(v)
+        rates = [v for k, v in out.items() if k.startswith(PLAY_RATE)]
+        if floor_ref > 0 and rates:
+            out["cards/below_floor"] = sum(v < floor_ref for v in rates)
+        return out
+    steps_per_epoch = rec["global_step"] / max(1, rec["epoch"])
+    snap = [0, 0.0]
+    ages = {label: [0, 0.0] for _, _, label in SNAPSHOT_AGE_BINS}
+    played = set()
     for spec, r in rec["results"].items():
-        out[f"results/{short(spec)}/score"] = r["score"]
-        out[f"results/{short(spec)}/games"] = r["games"]
+        ks, kg = results_keys(spec, league_sections=True)
+        out[ks], out[kg] = r["score"], r["games"]
+        e = snapshot_epoch(spec)
+        if e is None or not r["games"]:
+            continue
+        played.add(spec)
+        snap[0] += r["games"]
+        snap[1] += r["score"] * r["games"]
+        age = max(0.0, (rec["epoch"] - e) * steps_per_epoch)
+        for lo, hi, label in SNAPSHOT_AGE_BINS:
+            if lo <= age < hi:
+                ages[label][0] += r["games"]
+                ages[label][1] += r["score"] * r["games"]
+    if snap[0]:
+        out["league/score_vs_snapshots"], out["league/games_vs_snapshots"] = snap[1] / snap[0], snap[0]
+    for label, (g, s) in ages.items():
+        if g:
+            out[f"league/score_vs_snapshots_age_{label}"] = s / g
+            out[f"league/games_vs_snapshots_age_{label}"] = g
+    pool_p = []
     for k, v in (puffer_logs or {}).items():
-        if k.startswith("environment/") and isinstance(v, (int, float)) and math.isfinite(float(v)):
-            out[k] = float(v)
+        if not (k.startswith("environment/") and isinstance(v, (int, float)) and math.isfinite(float(v))):
+            continue
+        if k.startswith(ENV_LEAGUE):
+            sub = k[len(ENV_LEAGUE):]
+            if sub.startswith("p/"):
+                spec = sub[2:]
+                if spec in played:
+                    out[f"league_snapshots/snap_{snapshot_epoch(spec)}/p"] = float(v)
+                    pool_p.append(float(v))
+            else:
+                out[f"league/{sub}"] = float(v)
+            continue
+        out[k] = float(v)
+    if pool_p:
+        pool_p.sort()
+        n = len(pool_p)
+        out["league/pool_p_median"] = (pool_p[(n - 1) // 2] + pool_p[n // 2]) / 2
+        out["league/pool_p_min"], out["league/pool_p_max"] = pool_p[0], pool_p[-1]
+    rates = [v for k, v in out.items() if k.startswith(PLAY_RATE)]
+    if floor_ref > 0 and rates:
+        out["cards/below_floor"] = sum(v < floor_ref for v in rates)
     return out
+
+
+class WandbWindow:
+    """--log-interval N (D99): one wandb call per N epochs. Losses and PuffeRL's environment/* stats are
+    averaged over the epochs that reported them, results are summed (games; score = total score / games);
+    epoch, global_step, sps and pool_size are the last epoch's. The trainer logs through wandb_record
+    directly when N = 1, so the default is unchanged (SPEC §19.9.12). card_floor (D100) is the last epoch's;
+    cards/below_floor is counted on the averaged play rates. league_sections: see wandb_record."""
+
+    def __init__(self, n, floor_ref=0.0, league_sections=False):
+        self.n = max(1, int(n))
+        self.floor_ref = float(floor_ref)
+        self.league_sections = bool(league_sections)
+        self.clear()
+
+    def clear(self):
+        self.last = None
+        self.losses, self.env, self.results = {}, {}, {}
+
+    def add(self, rec, puffer_logs=None):
+        self.last = rec
+        for k, v in rec["losses"].items():
+            if v is not None:
+                s = self.losses.setdefault(k, [0.0, 0])
+                s[0] += v
+                s[1] += 1
+        for spec, r in rec["results"].items():
+            s = self.results.setdefault(spec, [0, 0.0])
+            s[0] += r["games"]
+            s[1] += r["score"] * r["games"]
+        for k, v in (puffer_logs or {}).items():
+            if k.startswith("environment/") and isinstance(v, (int, float)) and math.isfinite(float(v)):
+                s = self.env.setdefault(k, [0.0, 0])
+                s[0] += float(v)
+                s[1] += 1
+
+    def due(self, epoch):
+        return int(epoch) % self.n == 0
+
+    def pop(self):
+        """(wandb record, step) for the epochs added since the last pop, or None when there are none."""
+        if self.last is None:
+            return None
+        r = self.last
+        rec = {"epoch": r["epoch"], "global_step": r["global_step"], "sps": r["sps"], "pool_size": r["pool_size"],
+               "losses": {k: s / c for k, (s, c) in self.losses.items()},
+               "results": {spec: {"games": g, "score": sc / g} for spec, (g, sc) in self.results.items() if g}}
+        if "card_floor" in r:
+            rec["card_floor"] = r["card_floor"]
+        logs = {k: s / c for k, (s, c) in self.env.items()}
+        self.clear()
+        return wandb_record(rec, logs, self.floor_ref, self.league_sections), int(r["global_step"])
 
 
 # ------------------------------------------------------------------------------------ build
@@ -368,8 +560,16 @@ def build(a, ini, pool, run_dir, run_id, dashboard=False, reset_seed=None, env_o
         cfg["seed"] = int(reset_seed)        # the vecenv's async_reset seed
     kw = env_kwargs(a, ini, global_step)
     kw.update(env_overrides or {})
-    lv = LeagueVecEnv(pool, num_envs=int(a["num_envs"]), seed=int(a["seed"]), device=a["device"],
-                      opponent_greedy=bool(a["opponent_greedy"]), **kw)
+    fast = dict(env_threads=int(a.get("env_threads") or 0), cuda_graphs=bool(a.get("cuda_graphs")),
+                gpu_obs=bool(a.get("fast_opponents")), gpu_sample=bool(a.get("fast_opponents")),
+                vmap=bool(a.get("fast_opponents")))
+    if fast["env_threads"] > 1 or fast["cuda_graphs"] or fast["gpu_obs"]:     # opt-in throughput paths (D90)
+        from pufferroyale.fast_league import FastLeagueVecEnv
+        lv = FastLeagueVecEnv(pool, num_envs=int(a["num_envs"]), seed=int(a["seed"]), device=a["device"],
+                              opponent_greedy=bool(a["opponent_greedy"]), **fast, **kw)
+    else:
+        lv = LeagueVecEnv(pool, num_envs=int(a["num_envs"]), seed=int(a["seed"]), device=a["device"],
+                          opponent_greedy=bool(a["opponent_greedy"]), **kw)
     try:
         policy = Policy(lv.driver_env, **(ini["policy"] if policy_kwargs is None else policy_kwargs))
         if policy_kwargs is not None and rnn_kwargs is not None:
@@ -377,11 +577,22 @@ def build(a, ini, pool, run_dir, run_id, dashboard=False, reset_seed=None, env_o
         elif policy_kwargs is None and a["rnn"]:
             policy = Recurrent(lv.driver_env, policy, **ini["rnn"])
         policy = policy.to(a["device"])
+        if float(a.get("card_floor") or 0.0) > 0:
+            # D100: before the trainer deep-copies the policy (MMD reference) and before any CUDA graph is captured
+            try:
+                getattr(policy, "policy", policy).enable_card_floor(card_floor_at(a, global_step))
+            except ValueError as e:
+                raise SystemExit(f"--card-floor: {e}")
         lv.set_policy(policy)
         cls = MMDPuffeRL
         if not dashboard:                 # progress lines instead of the (screen-clearing) dashboard
             cls = type("MMDPuffeRL", (MMDPuffeRL,), {"print_dashboard": lambda self, *args, **kw: None})
         trainer = cls(cfg, lv, policy, logger=RunLogger(run_id))
+        if fast["cuda_graphs"]:
+            # AFTER the trainer: MMDPuffeRL deep-copies the policy for its reference, and the copy must run the
+            # plain forward with its own weights (install_learner_graph also guards this by object identity)
+            from pufferroyale.fast_league import install_learner_graph
+            install_learner_graph(policy)
     except BaseException:
         lv.close()
         raise
@@ -482,6 +693,8 @@ class LeagueRun:
         if self.ini.get("neptune"):
             raise SystemExit("--neptune is not supported by the PufferRoyale scripts: use --wandb")
         self._check_early_stop_args(a)
+        check_card_floor(a)
+        self.floor_on = float(a["card_floor"]) > 0
         self.pool = OpponentPool(anchors=parse_anchors(a["anchors"]), max_snapshots=int(a["max_snapshots"]),
                                  pfsp=a["pfsp"], pfsp_eps=float(a["pfsp_eps"]), self_play_frac=float(a["self_play_frac"]),
                                  anchor_frac=float(a["anchor_frac"]), seed=int(a["seed"]))
@@ -602,6 +815,7 @@ class LeagueRun:
         if ts.get("torch_rng") is not None:
             torch.set_rng_state(ts["torch_rng"].cpu())
         self.lv.episodes = int(self.saved.get("episodes", 0))
+        self._drop_eval_exports_after(int(ts["epoch"]))
         rng = (self.saved.get("rng") or {}).get("league")
         if rng:
             self.lv.load_rng_state(rng)
@@ -617,6 +831,15 @@ class LeagueRun:
                 tr.refresh_reference()
                 self._note("MMD reference initialised to the resumed learner"
                            + ("" if saved_coef > 0 else " (MMD was off in the saved run)"))
+
+    def apply_card_floor(self):
+        """D100: set the floor of the coming epoch on the learner and on the MMD reference (a refresh is a
+        load_state_dict, which does not carry the non-persistent floor buffer). Returns it."""
+        eps = card_floor_at(self.a, self.trainer.global_step)
+        for p in (self.policy, getattr(self.trainer, "ref_policy", None)):
+            if p is not None:
+                getattr(p, "policy", p).set_card_floor(eps)
+        return eps
 
     def _note(self, msg):
         self.notes.append(msg)
@@ -659,6 +882,50 @@ class LeagueRun:
         self.snapshots.append(os.path.basename(path))
         return path
 
+    def _drop_eval_exports_after(self, epoch):
+        """On resume: eval exports newer than the resumed epoch came from a trajectory that no longer exists
+        (the run restarts at its last save); delete them so hpc/eval_watch.py never evaluates them."""
+        d = os.path.join(self.run_dir, "eval_ckpt")
+        if not os.path.isdir(d):
+            return
+        dropped = 0
+        for n in os.listdir(d):
+            if n.startswith("policy_") and (n.endswith(".json") or n.endswith(".pt")):
+                try:
+                    e = int(n.split("_", 1)[1].split(".", 1)[0])
+                except ValueError:
+                    continue
+                if e > epoch:
+                    os.remove(os.path.join(d, n))
+                    dropped += n.endswith(".json")
+        if dropped:
+            self._note(f"eval exports after the resumed epoch {epoch} removed: {dropped}")
+
+    def export_for_eval(self, keep=24):
+        """<run>/eval_ckpt/policy_<epoch>.pt (+ .json with epoch / global_step, written last) for the
+        evaluation sidecar hpc/eval_watch.py (D91). config.json is copied next to them so eval.py applies
+        the run's env settings (placement grid included). Only the newest `keep` exports are kept; nothing
+        here touches the run's state, RNG streams or saves."""
+        import shutil
+        tr = self.trainer
+        d = os.path.join(self.run_dir, "eval_ckpt")
+        os.makedirs(d, exist_ok=True)
+        cfg = os.path.join(self.run_dir, "config.json")
+        if os.path.isfile(cfg) and not os.path.isfile(os.path.join(d, "config.json")):
+            shutil.copyfile(cfg, os.path.join(d, "config.json"))
+        stem = os.path.join(d, f"policy_{int(tr.epoch):07d}")
+        atomic_torch_save(cpu_state(self.policy), stem + ".pt")
+        with open(stem + ".json.tmp", "w") as fh:
+            json.dump({"epoch": int(tr.epoch), "global_step": int(tr.global_step), "run_id": self.run_id}, fh)
+        os.replace(stem + ".json.tmp", stem + ".json")
+        old = sorted(n for n in os.listdir(d) if n.startswith("policy_") and n.endswith(".json"))[:-keep]
+        for n in old:
+            for ext in (".json", ".pt"):
+                try:
+                    os.remove(os.path.join(d, n[:-5] + ext))
+                except FileNotFoundError:
+                    pass
+
     def _write_diagnostic(self, losses):
         diag = {"epoch": int(self.trainer.epoch), "global_step": int(self.trainer.global_step),
                 "nonfinite_losses": self.nonfinite, "nonfinite_params": self.bad_params, "losses": losses,
@@ -678,11 +945,14 @@ class LeagueRun:
         t_start, s_start = time.time(), tr.global_step
         interval = int(a["snapshot_interval"])
         pi = max(1, int(a["print_interval"]))
+        floor_ref = float(a["card_floor"]) if self.floor_on else 0.0
+        win = WandbWindow(a.get("log_interval") or 1, floor_ref, league_sections=True)
         self.last_saved_epoch = self.epoch0 if self.saved else None
         self.diagnostic = None
         while tr.global_step < int(a["total_timesteps"]):
             if not self.known.dashboard:
                 tr.last_log_time = -1e18   # PuffeRL only publishes an epoch's losses when it logs (>= 0.25 s apart)
+            eps = self.apply_card_floor() if self.floor_on else None   # D100: fixed for the epoch's rollout + update
             tr.evaluate()
             logs = tr.train()
             losses = {k: float(v) for k, v in tr.losses.items()}
@@ -705,26 +975,36 @@ class LeagueRun:
                 self.early_stopped = self.early_stop_reached()      # SPEC §19.7.3: checked at snapshot epochs
                 self.save()
                 self.last_saved_epoch = int(tr.epoch)
+            ev = int(a.get("eval_export_interval") or 0)
+            if not bad and ev > 0 and tr.epoch % ev == 0:
+                self.export_for_eval()
             sps = (tr.global_step - s_start) / max(time.time() - t_start, 1e-9)
             rec = {"epoch": int(tr.epoch), "global_step": int(tr.global_step), "sps": round(sps, 1),
                    "losses": {k: (v if math.isfinite(v) else None) for k, v in losses.items()},
                    "results": {s: {"games": g, "score": sc / g} for s, (g, sc) in window.items()},
                    "outcomes": outcomes,
                    "pool_size": self.pool.pool_size(), "snapshot": os.path.basename(snap) if snap else None}
+            if eps is not None:
+                rec["card_floor"] = eps
             if bad:
                 rec["nonfinite"] = True
             if self.early_stopped:
                 rec["early_stopped"] = True
             with open(hist_path, "a") as f:
                 f.write(json.dumps(rec, allow_nan=False) + "\n")
-            if self.wandb is not None:                       # SPEC §19.9.12: one call per record
-                self.wandb.log(wandb_record(rec, logs), int(tr.global_step))
+            if self.wandb is not None and win.n == 1:        # SPEC §19.9.12: one call per record
+                self.wandb.log(wandb_record(rec, logs, floor_ref, league_sections=True), int(tr.global_step))
+            elif self.wandb is not None:                     # D99: one call per --log-interval epochs
+                win.add(rec, logs)
+                if win.due(tr.epoch) or bad or self.early_stopped:
+                    self.wandb.log(*win.pop())
             if not self.known.dashboard and (tr.epoch % pi == 0 or snap or bad):
                 res = " ".join(f"{short(s)}={sc / g:.2f}/{g}" for s, (g, sc) in window.items()) or "-"
                 kl = f" kl {losses['mmd_kl']:.2e}" if "mmd_kl" in losses and float(a["mmd_coef"]) > 0 else ""
                 print(f"[league] step {tr.global_step:>8d} epoch {tr.epoch:>4d} sps {sps:6.0f} "
                       f"pg {losses.get('policy_loss', float('nan')):+.4f} v {losses.get('value_loss', float('nan')):.4f} "
-                      f"ent {losses.get('entropy', float('nan')):.3f}{kl} pool {self.pool.pool_size()} | {res}"
+                      f"ent {losses.get('entropy', float('nan')):.3f}{kl}"
+                      + (f" floor {eps:.4f}" if eps is not None else "") + f" pool {self.pool.pool_size()} | {res}"
                       + (f" | snapshot {os.path.basename(snap)}" if snap else "")
                       + (" | NON-FINITE: not saved" if bad else ""), flush=True)
             if bad:
@@ -735,6 +1015,10 @@ class LeagueRun:
                       f"{float(a['early_stop_score']):g} over the last {int(a['early_stop_window'])} matches vs every "
                       f"anchor", flush=True)
                 break
+        if self.wandb is not None:                           # D99: the last, partial window
+            last = win.pop()
+            if last is not None:
+                self.wandb.log(*last)
 
     def finish(self):
         """After a clean run: final save + model_<epoch>.pt, then release the trainer and envs."""

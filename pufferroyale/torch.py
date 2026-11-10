@@ -38,6 +38,15 @@ Nothing is stashed on the module between the calls.
 The placement grid of a policy is a persistent buffer (`action_grid`), so a checkpoint carries
 it (the conditional head has no grid-dependent parameter); loading a state dict of another grid
 raises.
+
+Card-probability floor (DECISIONS D100, opt-in, conditional head only): after
+enable_card_floor(eps) every legal hand slot keeps at least eps of the card distribution,
+P'(wait) = (1 - k eps) P(wait) and P'(s) = (1 - k eps) P(s) + eps for the k legal slots of a row,
+while the position distribution P(j | s) is unchanged; the joint logits, the sampled actions and
+PPO's log-probabilities all use P'. eps lives in the non-persistent buffer `card_floor` (so state
+dicts and checkpoints are unchanged, and a loaded checkpoint plays without a floor) and is read on
+every call, so set_card_floor(eps) also reaches forwards replayed from CUDA graphs. Enable it
+BEFORE any graph is captured; never enabled, the head runs exactly the statements it ran before.
 """
 from __future__ import annotations
 
@@ -301,6 +310,9 @@ class Policy(nn.Module):
         hand_off, _ = R.SCALAR_INDEX["hand"]
         self.register_buffer("sc_hand_idx", torch.arange(hand_off, hand_off + 4, dtype=torch.long), persistent=False)
         self.register_buffer("action_grid", torch.tensor(g, dtype=torch.long))      # persistent: in checkpoints
+        # D100 card-probability floor: off until enable_card_floor(); eps is a buffer so CUDA graphs read it
+        self.register_buffer("card_floor", torch.zeros((), dtype=torch.float32), persistent=False)
+        self.card_floor_on = False
         h2, w2 = _conv_out(_conv_out(H)), _conv_out(_conv_out(W))
         self.cnn = nn.Sequential(
             _init(nn.Conv2d(C, cnn_channels, 3, padding=1)), nn.ReLU(),
@@ -392,7 +404,8 @@ class Policy(nn.Module):
 
     def _conditional(self, hidden, observations):
         """The conditional head's parts for rows `hidden` (N, hidden) / observations (N rows):
-        logits (N, A) masked joint logits; card_logp (N, 5) log P(wait), log P(slot s);
+        logits (N, A) masked joint logits; card_logp (N, 5) log P(wait), log P(slot s) (floored when the
+        D100 floor is on);
         pos_logp (N, 4, B) log P(j | s); mask (N, A) bool."""
         x = observations.reshape(-1, R.OBS_SIZE).float()
         N = x.shape[0]
@@ -408,6 +421,8 @@ class Policy(nn.Module):
         card = torch.cat([self.wait_logit(hidden), self.slot_logit(cond).squeeze(-1)], dim=-1).float()
         card_ok = torch.cat([mask[:, :1], slot_mask.any(-1)], dim=-1)
         card_logp = torch.log_softmax(torch.where(card_ok, card, neg), dim=-1)                 # (N, 5)
+        if self.card_floor_on:                                                                  # D100
+            card_logp = self._floored(card_logp, card_ok)
         # (b) position distribution per slot over the grid's blocks
         board = self.pos_board(x[:, R.SPATIAL_OFFSET:R.SPATIAL_OFFSET + C * H * W].reshape(N, C, H, W))
         gamma, beta = self.film(cond).reshape(N, 4, 2, P).unbind(2)                           # (N, 4, P) each
@@ -424,6 +439,38 @@ class Policy(nn.Module):
             joint = torch.cat([card_logp[:, :1], (card_logp[:, 1:, None] + pos_logp).reshape(N, 4 * Bk)], dim=-1)
             logits = torch.where(mask, joint, neg)
         return {"logits": logits, "card_logp": card_logp, "pos_logp": pos_logp, "mask": mask}
+
+    # -- card-probability floor (D100) ----------------------------------------------------
+    @staticmethod
+    def _floor_value(eps) -> float:
+        if isinstance(eps, bool) or not isinstance(eps, numbers.Real) or not 0.0 <= float(eps) < 0.25:
+            raise ValueError(f"the card-probability floor must lie in [0, 0.25), got {eps!r}")
+        return float(eps)
+
+    def enable_card_floor(self, eps=0.0) -> None:
+        """Switch the floor on (conditional head only) and set it to eps. Call it before any CUDA graph
+        of this policy is captured: a graph keeps the code path it was captured with."""
+        if self.head != "conditional":
+            raise ValueError("the card-probability floor needs head='conditional'")
+        eps = self._floor_value(eps)
+        self.card_floor_on = True
+        self.card_floor.fill_(eps)
+
+    def set_card_floor(self, eps) -> None:
+        """Set eps in [0, 0.25) in place (the buffer keeps its storage, so captured graphs see it)."""
+        if not self.card_floor_on:
+            raise RuntimeError("set_card_floor before enable_card_floor")
+        self.card_floor.fill_(self._floor_value(eps))
+
+    def _floored(self, card_logp, card_ok):
+        """P'(wait) = (1 - k eps) P(wait), P'(s) = (1 - k eps) P(s) + eps for the k legal slots of a row;
+        illegal slots stay finfo.min. With eps = 0 every entry equals the unfloored one."""
+        eps = self.card_floor
+        slot_ok = card_ok[:, 1:]
+        log_keep = torch.log1p(-slot_ok.sum(-1, keepdim=True).to(card_logp.dtype) * eps)     # k eps <= 4 eps < 1
+        slots = torch.logaddexp(card_logp[:, 1:] + log_keep, torch.log(eps).expand_as(slot_ok))
+        slots = torch.where(slot_ok, slots, torch.finfo(card_logp.dtype).min)
+        return torch.cat([card_logp[:, :1] + log_keep, slots], dim=-1)
 
     def conditional_parts(self, observations):
         """Diagnostics of the conditional head (no grad state is changed): the dict of _conditional

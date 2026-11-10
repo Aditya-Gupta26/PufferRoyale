@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>PufferRoyale play</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0f1419;
+         color: #e6e9ed; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 440px; padding: 24px; text-align: center; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p { margin: 6px 0; color: #9aa7b4; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #f2c94c; margin-right: 6px;
+         animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>PufferRoyale: play against the policy</h1>
+  <p id="msg"><span class="dot"></span>Finding the game server…</p>
+  <p id="sub" style="font-size:13px"></p>
+</main>
+<script>
+// The permanent link of the PufferRoyale play site (an unofficial research simulator). The game server runs on a
+// university cluster behind a Cloudflare quick tunnel whose address changes every two days; target.json (kept
+// current by the site job, play/play_link.py) names the current one and the site's public access token (the owner
+// chose an open link on 2026-11-09; players sign in with name + PIN). This page sends the visitor there with that
+// token (an older ?token= in the visitor's link is replaced, so links keep working after the token changes; any
+// other parameter such as &owner= is kept), after checking that the server answers.
+const REPO = "__REPO__";
+const OK_URL = /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/;
+const OK_TOKEN = /^[A-Za-z0-9_-]{8,64}$/;
+const $ = id => document.getElementById(id);
+async function readTarget() {
+  const tries = [["https://api.github.com/repos/" + REPO + "/contents/target.json", {Accept: "application/vnd.github.raw+json"}],
+                 ["target.json?t=" + Date.now(), {}]];             // this site's own copy (may lag a few minutes)
+  for (const [u, h] of tries) {
+    try { const r = await fetch(u, {headers: h, cache: "no-store"}); if (r.ok) return await r.json(); } catch (e) {}
+  }
+  return null;
+}
+async function alive(url) {
+  try {
+    const c = new AbortController(); const t = setTimeout(() => c.abort(), 8000);
+    const r = await fetch(url + "/api/alive", {cache: "no-store", signal: c.signal}); clearTimeout(t);
+    return r.ok;
+  } catch (e) { return false; }
+}
+let waits = 0;
+async function go() {
+  const t = await readTarget();
+  if (t && t.status === "up" && OK_URL.test(t.url) && await alive(t.url)) {
+    $("msg").textContent = "Taking you to the game…";
+    const q = new URLSearchParams(location.search);
+    if (t.token && OK_TOKEN.test(t.token)) q.set("token", t.token);
+    const qs = q.toString();
+    location.replace(t.url + "/" + (qs ? "?" + qs : "") + location.hash);
+    return;
+  }
+  waits++;
+  $("msg").innerHTML = '<span class="dot"></span>The game server is restarting (it moves every two days).';
+  $("sub").textContent = "This page keeps trying by itself" + (waits > 1 ? " (tried " + waits + " times)" : "") +
+    ". If it takes long, try again later.";
+  setTimeout(go, Math.min(60000, 15000 + 5000 * waits));
+}
+go();
+</script>
+</body>
+</html>

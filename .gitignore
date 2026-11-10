@@ -23,3 +23,6 @@ data/raw/
 # OS
 .DS_Store
 resources
+.build_ext.lock
+.build_ext.log
+.build_flags

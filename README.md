@@ -1,439 +1,432 @@
 # PufferRoyale
 
-A deterministic, integer-only Clash Royale 1v1 battle simulator written in C (header-only
-C99), exposed to Python as a PufferLib 3.0 native environment and as a tick-level scenario /
-debug API. It targets the 2026 ladder battle rules with card statistics from the 15.535.29
-client (as decoded by [RoyaleSim](https://github.com/RoyaleGym/RoyaleSim)), all cards at
-tournament level 11.
+**A deterministic simulator of 1v1 Clash Royale-style battles, an agent trained on it by self-play for
+10 billion steps, and a website where anyone can play against that agent.**
 
-> **Disclaimer.** This is an unofficial, non-commercial research project. It is **not
-> affiliated with, endorsed, sponsored, or specifically approved by Supercell**, and
-> Supercell is not responsible for it (see Supercell's
-> [Fan Content Policy](https://supercell.com/en/fan-content-policy/)). The card numbers are
-> Supercell's and are used as measurement input only. Automating the real game (bots,
-> scripted input, live "advisors") violates Supercell's Terms of Service and gets accounts
-> banned; everything here runs in our own simulator. Do not point it at live servers.
+**[▶ Play against the agent](https://aditya-gupta26.github.io/pr-play/)** ·
+[The model](models/README.md) · [Research](#research) · [Advisor for the real game](#the-advisor-for-the-real-game) ·
+[Docs](docs/README.md)
 
-Status (SPEC v0.3-E.1, Phase E): the engine (match rules, **64 cards**, spells, pathing, the four
-tower troops), the scripted bots, the PufferLib 3.0 env `pufferroyale.Royale` (observations, masks, rewards,
-logs, text and raylib rendering), a masked PyTorch policy and the train / eval / watch /
-bench / end-to-end scripts are implemented and verified. Phase D (SPEC §15) adds the
-game-theoretic training and evaluation tooling: a league with PFSP opponents, an MMD-regularised
-PPO trainer, a best-response exploitability probe, a tournament with a meta-game Nash solver, and
-NYU Torch HPC templates. Phase E (SPEC §16) adds 43 cards (ids 21-63: spawners, death spawns and
-death bombs, Inferno ramps, the Bandit's dash, the Miner's burrow, the Elixir Collector, Rocket,
-Poison, Freeze, Earthquake, Lightning, Giant Snowball, Barbarian Barrel, ...), the Cannoneer, Dagger
-Duchess and Royal Chef tower troops, the compact v0.3 observation (integer card ids) and a policy
-that embeds them. Phase F (SPEC §17) adds a text interface for playing against language models
-(state rendering, action parsing, mock baselines and an optional Anthropic adapter). The binding
-contract is
-[`docs/SPEC.md`](docs/SPEC.md); every implementation choice the spec leaves open, and every
-known divergence from the real game, is listed in [`docs/FIDELITY.md`](docs/FIDELITY.md);
-design decisions are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+![A match on the play site: the agent (red, top) and the player (blue, bottom)](docs/images/play_match.png)
 
-## Install and build
+> **Unofficial research project.** PufferRoyale is non-commercial and is **not affiliated with, endorsed,
+> sponsored or approved by Supercell** (see Supercell's
+> [Fan Content Policy](https://supercell.com/en/fan-content-policy/)). The card statistics are Supercell's and
+> are used as measurement input only. The website uses no game art: units and towers are drawn with shapes,
+> letters and generic emoji. The advisor in [`advisor/`](advisor/) reads the screen of the real game, which
+> Supercell's Terms of Service forbid; read [its warning](#the-advisor-for-the-real-game) before using it.
 
-Requirements: macOS or Linux, a C99 compiler (Apple clang / clang / gcc), Python >= 3.10.
-The project venv is `.venv` (Python 3.12, created with `uv`) and already holds everything below.
+## Contents
 
-```bash
-source .venv/bin/activate
-make build                   # python setup.py build_ext --inplace -> pufferroyale/binding*.so (-O2)
-uv pip install -e .          # (or pip install -e .) the package: numpy + gymnasium
-uv pip install -e '.[train]' # + torch and PufferLib 3.0 for train.py / eval.py / the policy
-make debug                   # -O0 -g -fsanitize=address,undefined build in build/debug/pufferroyale/
-                             #   (never over the in-place release .so); use it with
-                             #   PUFFERROYALE_BINDING_DIR=build/debug/pufferroyale and the ASan runtime
-                             #   preloaded -- `make asan-py` does both for the Python suites
-```
+1. [How to play](#how-to-play)
+2. [The advisor for the real game](#the-advisor-for-the-real-game)
+3. [The released model](#the-released-model)
+4. [Research](#research): the simulator, the method, how it is implemented, results, compute, limitations
+5. [Build, test and reproduce](#build-test-and-reproduce)
+6. [Repository layout](#repository-layout)
+7. [Citing, licence and acknowledgements](#citing-licence-and-acknowledgements)
 
-**PufferLib 3.0 from source.** The `[train]` extra names `pufferlib>=3.0,<3.1`, but the env is a
-native PufferLib env and needs no Ocean environments, so install PufferLib from its 3.0 branch
-with `NO_OCEAN=1` (as the project venv was, commit `3b5c604`). That commit's `setup.py` needs a
-one-line fix under `NO_OCEAN=1` (`c_extension_paths` is only defined inside `if not NO_OCEAN:`;
-docs/DECISIONS.md D6):
+---
 
-```bash
-git clone -b 3.0 https://github.com/PufferAI/PufferLib.git && cd PufferLib && git checkout 3b5c604
-python - <<'PY'   # the one-line fix: define c_extension_paths before `if not NO_OCEAN:`
-s = open("setup.py").read()
-open("setup.py", "w").write(s.replace("c_extensions = []\n", "c_extensions = []\nc_extension_paths = []\n", 1))
-PY
-NO_OCEAN=1 uv pip install .   # (or NO_OCEAN=1 pip install .) then, back here: uv pip install -e '.[train]'
-```
+## How to play
 
-**raylib window (optional).** `tools/get_raylib.sh` downloads the prebuilt raylib 5.5 (macOS, or
-Linux x86_64) into `third_party/`; `PR_RAYLIB=1 make build` then links it statically. To use
-another raylib 5.5 build, point `RAYLIB_DIR` at a directory with `include/raylib.h` and
-`lib/libraylib.a`. Linux also needs the GL / X11 development libraries. Without a display
-the window is skipped and the text board is printed.
+### In your browser (nothing to install)
 
-```bash
-tools/get_raylib.sh && PR_RAYLIB=1 make build
-RAYLIB_DIR=/opt/raylib-5.5 PR_RAYLIB=1 make build
-```
+Open **https://aditya-gupta26.github.io/pr-play/** on a computer or a phone.
 
-Rebuild the extension after editing anything in `pufferroyale/csrc/` (`scripts/e2e_check.py`
-refuses a stale build). `setup.py` uses absolute paths, so it also builds when run from
-another directory.
+1. **Sign in.** Type a name and choose a 4-digit PIN. Next time, on any device, the same name and PIN bring back
+   your record, deck and settings.
+2. **Choose decks.** Pick one of the 7 preset decks or build your own from the 64 cards. Pick the agent's deck
+   too, or leave it on "random preset".
+3. **Play.** Press **Play**, then drag a card onto your half of the arena (or tap a card, then a tile).
+   - Your card goes in at the next engine tick, within 50 ms.
+   - The bar under the arena is your elixir; each card shows its cost.
+   - Keys: `1`-`4` pick a card, `Esc` cancels, `Space` pauses.
+4. **Win.** The rules of a 1v1 ladder battle:
+   - 3 minutes; each destroyed Princess tower is 1 crown, the King tower is all 3;
+   - if crowns are level, 2 minutes of sudden-death overtime, then the weakest tower's HP decides;
+   - elixir starts at 6, caps at 10, and comes 2× as fast from the last minute of regulation and 3× in the
+     last minute of overtime.
 
-## Test
+**What you face.** The agent decides every 0.5 s from what a player could see. It never sees your hand or your
+elixir, and you never see its. So far humans won **3 of 20 ranked matches** against it (details in
+[results](#humans)).
 
-```bash
-make test-c                  # C unit tests (clang -std=c99 -Wall -Wextra -Werror -Wshadow), incl.
-                             #   the snapshot fuzz test (tests/c/test_fuzz.c)
-make asan                    # the same under AddressSanitizer + UBSan (every binary has a
-                             #   TEST_TIMEOUT=300 s wall-clock limit; ASAN_SYMBOLIZE=1 symbolizes reports)
-make asan-py                 # builder + spec pytest suites against the ASan/UBSan extension
-                             #   (minus subprocess and timing tests, which need the release build)
-make CC=gcc-15 BUILD=build/gcc test-c   # also warning-free with gcc
-make bench                   # engine ticks/s on recorded random matches
-make bench-stress            # worst cases: 216 Skeletons across the river, and the SPEC §16 large
-                             #   battle (>= 10k ticks/s)
-python -m pytest tests/builder -q    # builder suite
-python -m pytest tests/spec -q       # independent tester's black-box suite
-make test                    # test-c + build + both pytest suites
-make gen / make gen-check    # regenerate the card / arena headers (byte-identical) / fail if stale
-python scripts/e2e_check.py  # the whole ladder, PASS/FAIL table, non-zero exit on failure
-python scripts/e2e_check.py --quick   # skip ASan, smaller soak and training smoke
-```
+**Extras on the page:**
 
-`tests/c/` and `tests/builder/` are the builder's tests; `tests/spec/` belongs to the
-independent tester (black-box tests against the SPEC).
+- **Assist:** *Hint* marks the agent's own pick for your side; *Autopilot* lets it play for you (any card you
+  play goes first). A match with assist is not ranked.
+- **Leaderboard:** counts finished matches at 1× speed with assist off.
+- **Watch:** every match is recorded and replayed exactly, because the engine is deterministic. Live matches
+  can be spectated.
 
-## Train, evaluate, watch
+**Availability.** The server runs on a CPU node of a university cluster and moves to a new node every two days.
+If the page says it is restarting, it keeps retrying by itself.
 
-```bash
-# self-play, both seats controlled by the learner (num_agents=2), CPU
-python scripts/train.py --total-timesteps 100000
-# against the scripted heuristic bot, learner side drawn per episode
-python scripts/train.py --num-agents 1 --opponent heuristic --total-timesteps 100000
-# LSTM policy on the Apple GPU, other decks, custom output directory
-python scripts/train.py --rnn --device mps --deck0 bait --deck1 random --data-dir runs
-# any config key: --section.key value  (see pufferroyale/config/royale.ini)
-python scripts/train.py --train.learning-rate 1e-4 --env.reward-tower 0.1
-
-# a checkpoint (run directory or model .pt) against every bot from both seats: W/D/L
-python scripts/eval.py --checkpoint experiments/pufferroyale_<run_id> --episodes 10
-python scripts/eval.py --bot-policy heuristic --bots random    # a scripted bot as the "learner"
-
-# watch a match as a text board (bot vs bot, or a checkpoint vs a bot)
-python scripts/watch.py --p0 heuristic --p1 random
-python scripts/watch.py --checkpoint experiments/pufferroyale_<run_id> --p1 heuristic
-python scripts/watch.py --raylib     # a window with a PR_RAYLIB=1 build and a display; else text
-
-python scripts/bench.py              # env steps/s for 1 and 16 native envs
-python scripts/bench.py --multiprocessing --workers 4
-```
-
-Training writes `experiments/pufferroyale_<run_id>/` (PuffeRL's `model_*.pt`,
-`trainer_state.pt`, and `config.json` describing the policy for `eval.py` / `watch.py`) and
-prints a JSON summary (steps, SPS, final losses, episode stats); it exits non-zero if a loss
-becomes non-finite. Judge progress by `learner_score` (the policy's own win 1 / draw 0.5 /
-loss 0; `score` is team 0's), which is also the `[sweep]` metric in `royale.ini`.
-
-## League training, exploitability, tournaments (SPEC §15)
-
-```bash
-# league: the learner plays itself (20%), the heuristic bot anchor (20%) and PFSP-weighted
-# snapshots of its past weights (60%; their mass goes to the anchor until the first snapshot)
-python scripts/league_train.py --total-timesteps 200000 --anchors bot:heuristic --num-envs 16
-# two anchors, more self-play, "variance" PFSP, and the MMD regulariser (KL to a reference
-# policy refreshed every 20 epochs; --mmd-coef > 0 selects MMDPuffeRL)
-python scripts/league_train.py --anchors bot:heuristic,bot:random --self-play-frac 0.4 --anchor-frac 0.2 \
-    --pfsp variance --mmd-coef 0.05 --mmd-ref-interval 20 --snapshot-interval 10 --max-snapshots 16
-# continue a run; --total-timesteps is the absolute target
-python scripts/league_train.py --resume experiments/league/<run_id> --total-timesteps 1000000
-
-# exploitability probe: train a fresh best response against one frozen snapshot, then play
-# --matches full matches (half per seat); prints JSON with br_score and 2*br_score - 1
-python scripts/best_response.py --target experiments/league/<run_id>/snap_100.pt \
-    --total-timesteps 200000 --matches 40 --out br.json
-
-# round-robin tournament of bots and checkpoints over decks: payoff matrix, Elo, meta-game Nash
-python scripts/tournament.py --agents bot:noop bot:random bot:heuristic experiments/league/<run_id>/snap_100.pt \
-    --decks hog26 giant --matches 4 --out tournament.json
-```
-
-A league run lives in `<data-dir>/league/<run_id>/`: `snap_<epoch>.pt` (the learner every
-`--snapshot-interval` epochs, added to the pool), `league_state.json` (pool snapshots -- stored
-relative to the run dir, so runs can be moved -- stats and RNG, epoch, step, args),
-`learner.pt` + `trainer_state.pt` (for `--resume`: the resumed run continues the learner, optimizer,
-pool and RNG states and re-deals the matches that were in progress, so it is deterministic but not
-bit-identical to an uninterrupted run; `--learning-rate` / `--train.adam-*` given at resume are
-applied), `nonfinite.json` if an epoch produced NaN/inf (that epoch is never saved and the run
-exits 1), `history.jsonl` (per
-epoch: losses and the learner's score against each opponent), and at the end `model_<epoch>.pt`
-+ `config.json`, so `eval.py`, `watch.py`, `best_response.py` and `tournament.py` accept the run
-directory or any snapshot. One progress line per epoch (`--print-interval`) shows the losses, the
-pool size and `opponent=score/games` for the episodes that finished in that epoch.
-
-Evaluation uses the settings a checkpoint was trained with: `tournament.py`, `best_response.py`,
-`eval.py` and `metagame.play_match` read frame_skip, deploy lockout, tiebreak and tower troops from the
-run's `config.json` (each checkpoint decides at its own frame_skip; bots every 10 ticks) and warn when a
-checkpoint plays under other settings; `--frame-skip N` / `--ignore-train-config` override. Every
-tool that plays a policy samples its actions from the masked policy by default, seeded so results
-are reproducible (SPEC §19.11). `--greedy` (`greedy=True` in Python) plays the card-first greedy
-rule instead: the most likely of wait and the four card slots by marginal probability, then that
-slot's most likely tile (`pufferroyale.league.greedy_actions`). Checkpoint
-arguments accept a `.pt` file, `ckpt:<path>` or a run directory; decks accept presets or 8
-comma-separated card names / ids. Every script trains with `MMDPuffeRL` (plain PPO at `--mmd-coef 0`),
-whose bf16 autocast never reuses stale weight casts (SPEC §18.6).
-
-The pieces are importable too:
-
-```python
-from pufferroyale.league import OpponentPool, LeagueVecEnv   # PFSP pool; learner-rows-only vecenv
-from pufferroyale.trainer import MMDPuffeRL                  # PuffeRL + mmd_coef * KL(pi || pi_ref)
-from pufferroyale import metagame as mg                      # solve_zero_sum, payoff_matrix, elo, ...
-
-pool = OpponentPool(anchors=("bot:heuristic",), self_play_frac=0.2, anchor_frac=0.2, seed=0)
-vecenv = LeagueVecEnv(pool, num_envs=16, seed=0, deck0="hog26", deck1="giant")  # hand to PuffeRL
-x, y, v = mg.solve_zero_sum([[0, -1, 1], [1, 0, -1], [-1, 1, 0]])     # RPS: uniform, value 0
-print(mg.play_match("bot:heuristic", "bot:random", "hog26", "giant", seed=0))  # +1 / 0 / -1
-```
-
-`LeagueVecEnv` wraps `num_envs` self-play matches and gives PuffeRL one learner row per match;
-the other seat is played by the opponent drawn from the pool for that episode (policy opponents
-batched without grad, bots in C), so opponent transitions never reach the PPO buffer. The
-learner's seat is drawn per episode. Everything is deterministic given the seeds. HPC (NYU
-Torch, Apptainer + SLURM) templates are in [`hpc/`](hpc/README.md).
-
-### Training operations (v0.5, SPEC §19; plan in [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md))
-
-```bash
-# reward v2 (potential-based, zero-sum; reward_gamma = train.gamma is injected), annealed to 0 over
-# the first 30% of the run; coarse placement grid (4x4 blocks: 161 actions); deck sampling
-python scripts/league_train.py --total-timesteps 2000000 --shaping-anneal-frac 0.3 \
-    --env.reward-tower 0.3 --env.reward-crown 0.2 --env.reward-elixir 0.02 --train.reward-clip 0 \
-    --env.placement-grid 4 --env.deck-pool "hog26;giant:2;random:50:0" --env.random-deck-frac 0.1
-# policy / trainer keys: --policy.head flat|conditional, --policy.card-stats 0|1, --policy.pos-channels N,
-#   --train.ent-coef-card X --train.ent-coef-pos Y (both or neither)
-# warm start (weights only, same architecture) and early stop at a snapshot epoch once the score over
-# the last N matches vs EVERY anchor is >= X
-python scripts/league_train.py --init-from experiments/league/<run> --anchors bot:heuristic \
-    --early-stop-score 0.6 --early-stop-window 2000
-# train.py: continue a run (absolute target), or start a new one from any checkpoint's weights
-python scripts/train.py --resume experiments/pufferroyale_<run_id> --total-timesteps 2000000
-python scripts/train.py --init-from experiments/league/<run>/snap_40.pt --shaping-anneal-frac 0.2
-# bot ladder: chained league runs gated on the score vs each anchor; writes <data-dir>/stages_<P>.json
-python scripts/stages.py --run-prefix S1 --rungs "bot:noop:5000000:0.95;bot:random:50000000:0.90" \
-    --gate-window 2000 --num-envs 256 --device cuda          # other flags go to every rung
-# eval: per deck (each as a mirror) + pooled rows, Wilson 95% intervals (ci95) in the JSON
-python scripts/eval.py --checkpoint experiments/league/<run> --decks "hog26;giant;random:5:0" --json e.json
-# best response that starts from the target's own weights
-python scripts/best_response.py --target experiments/league/<run>/snap_40.pt --init-from-target
-# within-run transitivity of the snapshots (payoff, Elo, Nash, later_beats_earlier, cyclic_triads)
-python scripts/transitivity.py --run experiments/league/<run> --snapshots 10 --matches 100 --out tr.json
-# score per opponent and losses vs step from history.jsonl (pip install -e '.[plots]' for matplotlib)
-python scripts/plot_history.py experiments/league/<run> --out curves.png
-# Weights & Biases (train.py and league_train.py; WANDB_MODE=offline works without network; without
-# --wandb, wandb is never imported)
-python scripts/league_train.py --wandb --wandb-project pufferroyale --wandb-group s1 --tag v05 ...
-```
-
-`config.json` records the env kwargs actually used (incl. `reward_gamma`, the anneal keys and
-`placement_grid`); every tool plays a checkpoint through its own placement grid.
-
-## Play against LLMs (SPEC §17)
-
-A provider-agnostic text interface: each decision, the model gets a static system prompt
-(`pufferroyale.llm.RULES_PROMPT`: rules, own-frame coordinates, all 64 cards with their level-11
-numbers, the reply format) and the current state as text (`render_state`), and answers with a final
-line `WAIT` or `PLAY <slot|card> AT <tx>,<ty>`. Unreadable replies, cards not in hand and illegal
-tiles count as `WAIT` and are recorded.
-
-```bash
-# offline baselines: no network, deterministic
-python scripts/llm_match.py --model mock_first_legal --opponent bot:heuristic --matches 10 --out runs/fl.json
-python scripts/llm_match.py --model mock_random --opponent bot:random --matches 10 --seed 3 --out runs/rnd.json
-python scripts/llm_match.py --model mock_wait --print-prompt          # show one rendered state
-# a real model (needs `pip install anthropic` + credentials); refused without --allow-network
-python scripts/llm_match.py --model anthropic:claude-opus-5-5 --effort low --opponent bot:heuristic \
-    --matches 4 --out runs/opus.json --allow-network
-# LLM vs LLM, or vs a trained checkpoint
-python scripts/llm_match.py --model anthropic:claude-sonnet-5 --opponent model:anthropic:claude-haiku-4-5 \
-    --matches 2 --out runs/sonnet_vs_haiku.json --allow-network
-python scripts/llm_match.py --model mock_random --opponent experiments/league/<run_id>/snap_100.pt --matches 4
-```
-
-Seats alternate; the model decides every `--decision-interval` ticks (20 = 1 s of game time;
-bots and checkpoints act every 10 ticks, the env cadence). The last stdout line is a JSON summary
-(W/D/L, score, mean crowns, illegal / parse-error / model-error rates per decision, mean latency);
-`--out` also writes per-match results and `<out>.transcripts.jsonl` (every decision: tick, prompt
-hash, reply, action, error, latency, and the API's stop reason / token usage / refusal / error).
-Known Anthropic model ids: `claude-opus-5-5`, `claude-opus-5`, `claude-fable-5-1`,
-`claude-sonnet-5`, `claude-haiku-4-5`. The adapter caches the system prompt, sends no assistant
-prefill, leaves thinking at the model default (`--effort` trades depth for latency; not sent to
-Haiku), adds server-side refusal fallbacks for Fable 5.1 / Opus 5, and treats refusals and failed
-calls as `WAIT`.
-
-```python
-import pufferroyale as pr
-from pufferroyale import llm
-
-agent = llm.LLMAgent(llm.mock_first_legal)            # any model_fn(system, user) -> str
-res = llm.play_llm_match(agent, "bot:heuristic", "hog26", "giant", seed=0)
-print(res)                    # result, crowns, end_reason, ticks, decisions, illegal, parse_errors, ...
-g = pr.Game(seed=0); g.tick(200)
-print(llm.render_state(g, 0))                          # the text a model sees (own frame, public info only)
-action, info = llm.parse_action("PLAY 1 AT 9,20", g, 0)
-```
-
-The rendered state never contains the opponent's elixir, hand, queue or unrevealed deck: only the
-cards it has played, the last four, its hand once all eight cards have been seen, and an elixir
-upper bound computed from what it spent (tested by changing those hidden values and comparing the
-text). The mocks read only the text (`mock_first_legal` plays the first affordable card at the first
-tile of its listed legal region), which shows the text alone is enough to play.
-
-## Quick start (Python)
-
-```python
-import numpy as np
-import pufferroyale as pr
-from pufferroyale import royale as R
-
-# the scenario / debug API
-g = pr.Game(deck0="hog26", deck1="giant", seed=0)   # deploy lockout 90 ticks by default
-g.tick(90)
-print(g.state()["hand"][0])                          # 4 card ids of team 0's hand
-err = g.play_tile(0, slot=0, tx=3, ty=20)            # own-frame tile; applied in the next tick
-g.tick(1)
-for e in g.entities():
-    print(e["id"], e["unit"], e["team"], e["x"], e["y"], e["hp"])
-mask = g.legal_mask(1)                                # uint8[2305], exactly the engine's legality
-a = pr.bot_action(g, 1, "heuristic")                  # a scripted bot's (legal) action
-snap = g.snapshot(); g.tick(100); g.restore(snap)     # memcpy snapshot of the POD state
-print(g.ansi())                                       # text board
-print(pr.card_info("Knight")["hitpoints"])            # 1766 (level 11)
-
-# the PufferLib env: 4 matches, self-play (8 agent rows), own-frame observations
-env = pr.Royale(num_envs=4, num_agents=2, seed=0)
-obs, _ = env.reset(seed=0)                            # (8, R.OBS_SIZE) float32
-legal = obs[:, R.MASK_OFFSET:] > 0.5                  # the action mask (action 0 = no-op)
-obs, rew, term, trunc, info = env.step(np.zeros(8, np.int32))
-print(R.SCALAR_INDEX["elixir"], R.scalar(obs[0], "elixir"))
-env.close()
-```
-
-Coordinates are engine-frame millitiles (1 tile = 1000, `y = 0` is the top edge; team 0 is
-the bottom player). One tick is 50 ms; speeds are millitiles per tick. Env actions are
-`Discrete(2305)`: 0 = no-op, else `slot = (a-1)//576`, own-frame tile `cell = (a-1)%576`.
-With `pufferlib.vector.make(pufferroyale.Royale, backend=Serial | Multiprocessing, ...)` the
-env also runs under PufferLib's Python vectorization (spawn start method on macOS).
-
-## Cards, decks, tower troops
-
-64 cards at level 11, ids stable (`pr.CARD_NAMES[i]`): 0 Knight, 1 Archers, 2 Musketeer, 3 Giant,
-4 Hog Rider, 5 Minions, 6 Baby Dragon, 7 Valkyrie, 8 Skeleton Army, 9 Skeletons, 10 Ice Golem,
-11 Ice Spirit, 12 Prince, 13 Wizard, 14 Cannon, 15 Tesla, 16 Fireball, 17 Arrows, 18 Zap, 19 The Log,
-20 Goblin Barrel, 21 Barbarians, 22 Mini P.E.K.K.A, 23 P.E.K.K.A, 24 Mega Minion, 25 Bats, 26 Spear
-Goblins, 27 Goblins, 28 Goblin Gang, 29 Royal Giant, 30 Bomber, 31 Princess, 32 Dart Goblin,
-33 Minion Horde, 34 Fire Spirit, 35 Ice Wizard, 36 Golem, 37 Lava Hound, 38 Balloon, 39 Giant
-Skeleton, 40 Witch, 41 Tombstone, 42 Inferno Tower, 43 Inferno Dragon, 44 Bandit, 45 Battle Ram,
-46 Royal Hogs, 47 Miner, 48 Mortar, 49 X-Bow, 50 Elixir Collector, 51 Bomb Tower, 52 Rocket,
-53 Poison, 54 Freeze, 55 Earthquake, 56 Lightning, 57 Giant Snowball, 58 Barbarian Barrel,
-59 Rascals, 60 Elite Barbarians, 61 Skeleton Dragons, 62 Wall Breakers, 63 Night Witch.
-
-Preset decks (`pr.DECKS`; `'random'` draws 8 of the 64 at every reset):
-
-| name | cards |
+| Lobby | On a phone |
 |---|---|
-| `hog26` | Hog Rider, Musketeer, Cannon, Ice Golem, Ice Spirit, Skeletons, Fireball, The Log |
-| `giant` | Giant, Prince, Baby Dragon, Wizard, Minions, Knight, Arrows, Zap |
-| `bait` | Goblin Barrel, Skeleton Army, Tesla, Valkyrie, Archers, Knight, The Log, Fireball |
-| `golem` | Golem, Night Witch, Baby Dragon, Lightning, Mega Minion, Barbarian Barrel, Mini P.E.K.K.A, Zap |
-| `lavaloon` | Lava Hound, Balloon, Minions, Mega Minion, Skeleton Dragons, Arrows, Fireball, Tombstone |
-| `xbow` | X-Bow, Tesla, Archers, Knight, Skeletons, Ice Spirit, Fireball, The Log |
-| `miner_poison` | Miner, Poison, Goblin Gang, Bats, Inferno Tower, Valkyrie, Spear Goblins, The Log |
-| `pekka_bridge` | P.E.K.K.A, Battle Ram, Bandit, Minions, Musketeer, Zap, Poison, Dart Goblin |
-| `royal_hogs` | Royal Hogs, Earthquake, Fire Spirit, Barbarian Barrel, Goblin Gang, Mega Minion, Zap, Musketeer |
+| <img src="docs/images/play_lobby.png" alt="Lobby: name and PIN, decks, leaderboard" width="480"> | <img src="docs/images/play_phone.png" alt="A match on a phone" width="220"> |
 
-Tower troops replace both Princess towers of a team: `Game(..., tower_troop0="cannoneer",
-tower_troop1="royal_chef")`, `Royale(..., tower_troop0=..., tower_troop1=...)` or
-`--env.tower-troop0 dagger_duchess` in `train.py`; values `princess` (default), `cannoneer`,
-`dagger_duchess`, `royal_chef`. Both tower troops are visible in the observation.
+### On your own computer
 
-**Observation (v0.5, SPEC §16.4 + §19.3).** `OBS_SIZE = 17715` = 25 spatial planes x 32 x 18 + 64 entity
-rows x 11 + 306 scalars + the 2305-long action mask. Card identities are integer ids `card_id + 1`
-(0 = empty) in entity feature 0 and in the `hand`, `next_card`, `opp_last4` and `own_deck` (the own
-deck as a set, ascending ids) scalars; opponent cards seen / deduced hand are 128-wide multi-hots;
-`own_tower_troop` / `enemy_tower_troop` are 4-wide one-hots. Offsets: `R.SCALAR_INDEX`,
-`R.ENTITY_FEATURES`, `R.CARD_SLOTS`. The mask stays the fine 2305-mask under any `placement_grid`;
-`R.action_mask(obs, grid)` derives the coarse one. Checkpoints from before v0.5 do not load.
+You need Linux or macOS, a C compiler and Python 3.10 or newer. Install
+[PufferLib 3.0 from source](docs/DEVELOPING.md#install-and-build) first (a one-line fix is needed; the link
+shows it). Then:
 
-## Layout
-
-```
-pufferroyale/
-  csrc/                header-only C99 engine
-    pr_math.h          isqrt64, floor/ceil division, PCG32, FNV-1a
-    pr_defs.h          card-database row types
-    pr_card_db.h       GENERATED level-11 card / unit / projectile / area / buff tables
-    pr_arena_db.h      GENERATED 36x64 half-tile arena bitmask, tile flags, tower centres
-    pr_types.h         constants and the plain-old-data game state (PrState)
-    pr_arena.h         arena queries (team-oriented, seat-symmetric)
-    pr_entity.h        entity pool (sorted by id), formations, status queries
-    pr_rules.h         elixir, hand & cycle, placement legality + mask, plays, towers, Judge
-    pr_target.h        targeting (acquisition, retention, default route)
-    pr_combat.h        attack cycle, damage buffer, projectiles, buffs, knockback, Resolve, Reap
-    pr_path.h          flow-field ground pathing + line of sight (pure cache outside the state)
-    pr_move.h          Path/Move and Collide phases
-    pr_spell.h         spells (projectile, waves, area, rolling, pulsing, Lightning), death bombs
-    pr_engine.h        reset, the 11-phase tick pipeline (spawners, Collector, Royal Chef in
-                       Status), state hash, debug hooks, snapshot validation
-    pr_bots.h          scripted bots: noop, random, heuristic (integer-only, own RNG)
-    pr_obs.h           observation encoder (spatial planes, entity rows, scalars, mask)
-    pr_render.h        ANSI text board; raylib window under PR_RAYLIB
-    royale.h           PufferLib 3.0 Env: c_reset / c_step / c_render / c_close, Log
-  binding.c            the pufferroyale.binding extension (env protocol + debug API + bots;
-                       Phase D: env_log_peek, a read-only view of one env's episode log)
-  env_binding.h        vendored PufferLib 3.0 binding header (unmodified)
-  game.py              pufferroyale.Game / Bot / bot_action / card_info / DECKS / PlayError
-  royale.py            pufferroyale.Royale (PufferEnv) + observation layout constants
-  torch.py             Policy (CNN + card-id embeddings + entity pooling + scalar MLP, masked
-                       logits), Recurrent
-  league.py            OpponentPool (PFSP) + LeagueVecEnv (learner rows only) + checkpoint loader
-  trainer.py           MMDPuffeRL: PuffeRL + mmd_coef * KL(pi || pi_ref)
-  metagame.py          zero-sum LP solver, payoff matrix, meta-game Nash, Bradley-Terry Elo, play_match
-  llm.py               text interface for LLM play: RULES_PROMPT, render_state, parse_action, LLMAgent,
-                       play_llm_match, mock model functions, optional Anthropic adapter
-  config/royale.ini    PuffeRL config (merged over pufferlib's default.ini)
-scripts/               train.py, eval.py, watch.py, bench.py, e2e_check.py,
-                       league_train.py, best_response.py, tournament.py, llm_match.py
-hpc/                   Apptainer definition + NYU Torch SLURM templates (not run locally)
-tools/gen_card_db.py   data/source/cards-15.535.json -> pr_card_db.h
-tools/gen_arena.py     data/source/royalesim-arena.json -> pr_arena_db.h
-tools/get_raylib.sh    fetch the prebuilt raylib 5.5 into third_party/ (optional renderer)
-tests/c/               C unit tests (engine, rules, combat, specials, §16 cards, path, env, fuzz),
-                       soak, benchmarks
-tests/builder/         builder pytest suite
-tests/spec/            tester-owned pytest suite
-data/source/           pinned inputs (see data/source/PROVENANCE.md)
-docs/                  SPEC.md (contract), FIDELITY.md, DECISIONS.md, PLAN.md
+```bash
+git clone https://github.com/Aditya-Gupta26/PufferRoyale.git && cd PufferRoyale
+pip install -e '.[train]'        # numpy, gymnasium, torch (+ PufferLib, installed above)
+make build                       # compiles the C engine into pufferroyale/binding*.so
+python play/play_server.py       # prints http://localhost:8765/?token=...  -> open it
 ```
 
-## Design in one paragraph
+The server plays the model in [`models/`](models/README.md) by default (`--checkpoint` picks another). The full
+site, as it runs on the cluster, is described in [`docs/HUMAN_PLAY.md`](docs/HUMAN_PLAY.md).
 
-The whole match is one fixed-size POD struct (`PrState`, ~65 KB): no pointers, no heap
-after init, zeroed with `memset` so that padding is deterministic; snapshot and restore are
-`memcpy`, the state hash is FNV-1a over its bytes. The simulation uses integers only
-(millitiles, milliseconds, exact `isqrt` on int64) and runs RoyaleSim's measured tick phase
-order: Upkeep, Status, Spawn, Target, Attack, Path/Move, Collide, Projectile, Resolve,
-Reap, Judge. All damage is buffered and applied simultaneously in Resolve. Ground pathing
-uses Dijkstra distance fields over the half-tile grid with line-of-sight smoothing; the field
-cache lives outside the state but is a pure function of it, so snapshots stay exact. A
-scenario and its 180-degree rotation evolve as exact rotations of each other. The env wraps
-one match per native env; observations are written in each team's own frame by the same C
-code that decides legality, so the action mask is the engine's legality function; bots use
-their own RNG streams, never the game's.
+To watch a match in the terminal instead:
 
-## Licences
+```bash
+python scripts/watch.py --checkpoint models/S4_A_s1_10B.pt --p1 heuristic   # the agent vs the scripted bot
+```
 
-Code: see the repository licence. `pufferroyale/env_binding.h` is from PufferLib (MIT,
-`pufferroyale/PUFFERLIB_LICENSE`); the data inputs come from RoyaleSim (MIT,
-`data/source/ROYALESIM_LICENSE`; the card numbers themselves are Supercell's).
+---
 
-## Training on the NYU HPC cluster
+## The advisor for the real game
 
-See `docs/HPC_HANDOFF.md` (a step-by-step guide for an agent or person with cluster access: container build, verification incl. `scripts/golden_hashes.py`, throughput calibration, learning gates, the course experiments and evaluation) and the templates in `hpc/`.
+> [!WARNING]
+> **Read this before using it.** The advisor reads the screen of the real Clash Royale game. Supercell's Terms
+> of Service (effective 2024-11-06) prohibit "automation software, emulators, bots, hacks, mods or any
+> unauthorized third-party software designed to modify or interfere with the Service", and getting information
+> "using any method not expressly permitted". A screen-reading advisor is third-party software reading the
+> game, so **using it can get your account banned**. It is published as research. If you try it, use it only
+> outside ranked play (Training Camp, or a friendly battle with a friend who agrees), on an account you accept
+> the risk for. Never use it against people who do not know.
+
+**What it does.** It reads the game picture (a phone mirrored with `scrcpy`, or the PC client) and rebuilds the
+agent's exact 17,715-number observation. It then runs the agent and shows its suggested card, tile and
+probability in a separate window. It **never taps or sends input to the game**; you decide and play.
+
+```
+frame --perception--> units, hand, elixir, towers --tracker--> board state --encoder--> observation --policy--> suggestion
+```
+
+**How well it works** (all measured in the simulator, where the truth is known):
+
+- **The encoder is exact.** 409,566 states from 600 simulated matches encode to exactly the engine's own
+  observation (0 mismatches).
+- **Imperfect seeing and latency cost most of the agent's edge.** The agent playing through the advisor scores
+  against itself playing on the engine's own observation (0.5 = no loss):
+  - perfect perception: **0.501** (1,000 matches);
+  - with the measured detector errors: **0.250**;
+  - with errors plus 0.5 s delay: **0.190**.
+
+Setup, its checks and every known gap: [`docs/ADVISOR.md`](docs/ADVISOR.md). Its unit detector comes from
+[ClashRoyaleBuildABot](https://github.com/Pbatch/ClashRoyaleBuildABot) (MIT; the model's metadata names
+AGPL-3.0) and is downloaded separately; this repository contains no detector weights.
+
+---
+
+## The released model
+
+[`models/S4_A_s1_10B.pt`](models/README.md): the agent on the website.
+
+| | |
+|---|---|
+| Run | `S4_A_s1`: pure self-play PPO, seed 1, all 64 cards |
+| Training | 10,000,007,168 steps; 23.9 million self-play matches; 188.7 h on one NVIDIA A100 |
+| Size | 1,287,556 parameters (5.2 MB), feed-forward, card-first action head |
+| vs the scripted heuristic bot | **0.939** [0.923, 0.952] on 52 held-out decks (1,040 matches, at 9.9B steps) |
+| Exploitability | no exploit found by 4 trained attackers (measured at 7.81B steps; [details](#exploitability)) |
+| vs humans | humans 3 wins, 17 losses in ranked matches |
+
+How to load it, its full training settings, its intended use and its limits are in the
+[model card](models/README.md).
+
+---
+
+## Research
+
+### In short
+
+- **Question:** can a small agent learn a real-time, partially observed card battle game from self-play alone,
+  and how exploitable does it end up? Exploitability means how badly a purpose-trained attacker can beat it.
+- **What we built:**
+  - an exact, fast simulator (C99, integers only, 64 cards);
+  - a PPO agent with a card-first action head;
+  - a league training and evaluation toolkit: round robins, Elo, meta-game Nash, best-response exploitability;
+  - a pre-registered model-selection pipeline.
+- **What we found:**
+  1. At 1B steps on one deck, every method's final policy was **easy to exploit** (best-response score
+     0.85-0.87). No method was clearly better.
+  2. With all 64 cards and 10B steps, **league + MMD training collapsed in all 4 runs**. Pure self-play never
+     collapsed.
+  3. The selected pure self-play agent beats the scripted bot about **94%** of the time on decks it never trained
+     with. Trained attackers did not find an exploit, but a stronger attacker might (a best response gives only
+     a lower bound).
+  4. **Forcing card diversity during training made the agent weaker.** A floor on each card's probability lost
+     head-to-head to the unfloored control: 0.68 to 0.82 for the control.
+  5. Humans won 3 of 20 ranked matches against the final agent.
+
+### The simulator
+
+| | |
+|---|---|
+| Engine | header-only C99, **integer-only** state (millitiles, milliseconds, exact integer square root); same seed + same actions ⇒ bit-identical state; snapshot/restore is `memcpy`; FNV-1a state hash |
+| Clock | 20 ticks/s; the agent acts every 10 ticks (0.5 s); regulation 3,600 ticks + 2,400 overtime |
+| Content | **64 cards** at tournament level 11, stats from the 15.535.29 client as decoded by [RoyaleSim](https://github.com/RoyaleGym/RoyaleSim); 4 tower troops |
+| Observation | 17,715 floats: 25 board planes (32 × 18 tiles), 64 entity slots, 306 scalars, the legality mask. The opponent's hand, elixir and unseen deck are never included (tested) |
+| Actions | `Discrete(2305)`: wait, or one of 4 hand slots × 576 tiles; the mask is the engine's own legality check |
+| Speed | ~500,000 engine ticks/s and ~25,000 env steps/s on one Apple M4 core |
+| Checks | C unit tests and fuzzing (167,993 checks in this release's run, 0 failures); a 1,000-match 180° rotation fuzz with 0 divergences; an independent black-box spec test suite |
+
+Specification: [`docs/SPEC.md`](docs/SPEC.md). Every choice the spec leaves open, and every known difference
+from the real game: [`docs/FIDELITY.md`](docs/FIDELITY.md).
+
+### The agent
+
+A feed-forward network with **1,287,556 parameters** (`pufferroyale/torch.py`):
+
+- **Encoders:**
+  - a CNN over the 25 board planes → 256 values;
+  - a shared MLP over entity slots with masked mean and max pooling per side → 4 × 128;
+  - an MLP over the scalars and 17 card ids → 128.
+  - Each card id is encoded as a learned 16-d embedding plus a 16-d projection of 24 engine statistics (cost,
+    HP, damage, range, speed, ...). So the agent "knows" what a card does even when it has rarely played it.
+- **Card-first head.** The agent first picks *whether* to play and *which* card,
+  $P(\text{wait})$ and $P(s)$ for the 4 hand slots. Then it picks *where*, $P(\text{tile}\mid s)$, from a
+  full-resolution board CNN modulated per card (FiLM). The joint log-probability
+  $\log P(s) + \log P(\text{tile}\mid s)$ is one 2,305-way categorical, so PPO sees an ordinary discrete action.
+
+### Training
+
+- **PPO** with [PufferLib 3.0](https://github.com/PufferAI/PufferLib) (`PuffeRL`), 256 parallel learner rows,
+  batch 16,384, minibatch 1,024, learning rate 3e-4, γ = 0.999, λ = 0.95, entropy 0.01.
+- **Opponents (three methods compared):**
+  - **A**, pure self-play;
+  - **B**, a league: 35% self-play and 65% past snapshots chosen by prioritised fictitious self-play (PFSP), with
+    weight $(1-p)^2$ where $p$ is the learner's score against that snapshot;
+  - **C**, B plus an **MMD** (magnetic mirror descent) regulariser, $\mathcal{L} = \mathcal{L}_\text{PPO} +
+    \alpha\,\mathrm{KL}(\pi_\theta \,\|\, \pi_\text{ref})$ with a periodically refreshed reference policy.
+- **Reward:** win +1, loss −1, draw 0, plus potential-based shaping from tower HP, crowns and wasted elixir. The
+  shaping is annealed to 0 over the first 0.5B steps. The potential form keeps the optimal policy unchanged;
+  evaluation never uses it.
+- **Decks:** each seat gets a random 8-card deck half of the time and one of 7 preset decks otherwise. 52 decks
+  (X-Bow, Royal Hogs and 50 random ones) are **held out** for evaluation.
+- **Card-probability floor (ablation):** $P'(s) = (1 - k\varepsilon)\,P(s) + \varepsilon$ for the $k$ playable
+  cards. It is used only in training; evaluation and the website play without it.
+
+<details>
+<summary><b>Where each piece is implemented</b></summary>
+
+| Piece | File |
+|---|---|
+| Engine (rules, combat, pathing, spells, the tick pipeline) | `pufferroyale/csrc/*.h` |
+| PufferLib environment, observation layout | `pufferroyale/royale.py`, `pufferroyale/csrc/royale.h`, `pufferroyale/csrc/pr_obs.h` |
+| Policy (encoders, card-first head, card floor) | `pufferroyale/torch.py` |
+| League: opponent pool, PFSP, snapshots | `pufferroyale/league.py`, `scripts/league_train.py` |
+| MMD regulariser | `pufferroyale/trainer.py` (`MMDPuffeRL`) |
+| Reward shaping and annealing, deck sampling | `pufferroyale/csrc/royale.h`, `scripts/league_train.py` |
+| Best-response exploitability probe | `scripts/best_response.py` |
+| Round robin, Elo (Bradley-Terry), meta-game Nash (LP) | `pufferroyale/metagame.py`, `scripts/tournament.py`, `hpc/stage4_eval.py` |
+| Evaluation vs scripted bots (Wilson intervals) | `scripts/eval.py`, `hpc/eval_watch.py` |
+| Cluster jobs (Slurm + Apptainer) | `hpc/` |
+| Play site | `play/` |
+| Advisor | `advisor/` |
+| Text interface for language models | `pufferroyale/llm.py`, `scripts/llm_match.py`, `hpc/llm_game.py` |
+
+</details>
+
+### How models were evaluated
+
+- **Against scripted bots** (`noop`, `random`, a rule-based `heuristic`): score = (wins + draws/2) / matches,
+  both seats, with Wilson 95% intervals. Pool decks and held-out decks are reported separately.
+- **Best-response exploitability.** A fresh learner trains against one frozen target, then plays 1,000 matches
+  against it. The target's exploitability is measured by $\text{br\_score} = (W + D/2)/1000$; above 0.5 means
+  the attacker found a way to win. Two kinds of attacker were used:
+  - *copy-start*, which begins as a copy of the target (150M steps);
+  - *from-scratch* (1B steps).
+
+  This only gives a lower bound: a stronger attacker might do better.
+- **Round robins.** 9 preset decks × 200 matches per pair (1,800 matches) give a payoff matrix, Elo ratings
+  (Bradley-Terry) and the Nash equilibrium of the meta-game, i.e. which mix of models is hardest to beat.
+
+### Results
+
+All numbers below come from [`docs/STAGE4_SELECTION.md`](docs/STAGE4_SELECTION.md) and
+[`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md), where every run is logged with its job id, commit and command.
+
+**1. Methods at small scale (stage 3: one deck, 1B steps, 3 seeds).** Every method's final policy was easy to
+exploit. The mean best-response score was A 0.874, B 0.847, C 0.863, and the spread between seeds (up to 0.32)
+was larger than the gaps between methods.
+
+**2. Full game (stage 4: 64 cards, 10B steps).**
+- All four league + MMD (C) runs **collapsed** between 1.65B and 2.9B steps: tile choice became deterministic,
+  then the set of cards played narrowed.
+- No pure self-play run collapsed.
+- A one-seed ablation suggests the collapse needs MMD *and* snapshot opponents together.
+
+**3. Model selection.** The rules were written before any result: round robin → exploitability → winner.
+
+- **Round robin of 9 candidates.** Elo leader C@1.55B 1648, then S4x_selfonly 1623 and S4_A_s1 1588. No
+  candidate beats all the others.
+
+![Round robin of the 9 selection candidates](docs/figures/stage1_round_robin.png)
+
+- **<a id="exploitability"></a>Exploitability**, 2 copy-start attackers per candidate:
+  - S4_A_s1 scored 0.4845 and 0.4565;
+  - two candidates were exploited in both seeds (0.65-0.75).
+
+![Best-response exploitability of the candidates](docs/figures/selection_br.png)
+
+- **Winner: S4_A_s1** (pure self-play, seed 1). Two from-scratch 1B-step attackers then scored only 0.0745 and
+  0.166 against it.
+- **Caveat:** many copy-start attackers ended *below* 0.5, which should not happen to a copy. So the selection
+  read every score below 0.5 as 0.5 (no exploit found). That reading was adopted after the scores were seen;
+  taken literally, the original rule would have picked S4d_A_s0. Both readings are in the log.
+
+**4. The selected agent** (the released model; numbers at the step closest to 10B that has an evaluation):
+
+![Training curve of the selected agent](docs/figures/training_curve.png)
+
+| Opponent | Score | Matches |
+|---|---|---|
+| Heuristic bot, 52 held-out decks | 0.939 [0.923, 0.952] | 1,040 (at 9.9B) |
+| Heuristic bot, 7 pool decks | 0.950 [0.900, 0.976] | 140 (at 9.9B) |
+| Heuristic bot, pre-registered check at 5B | 0.912 pool / 0.906 held-out | 1,008 / 1,040 |
+| Random bot, pool / held-out decks | 1.000 / 0.998 | 140 / 1,040 (at 9.9B) |
+| One-deck specialists from stage 3, in their own Hog mirror | 0.210 and 0.075 | 200 each (at 9.9B) |
+
+The 64-card generalist still **loses clearly to agents that trained on only one deck**, on that deck.
+
+**5. Does forcing card diversity help? (stage 4/5 ablation).**
+- Four copies of the agent at 10.0B trained 1.0B more steps each:
+  - the **control** with no floor;
+  - copies with card floors 0.05, 0.10 and 0.20.
+- Against the scripted bot on held-out decks, floors 0.10 and 0.20 fall below the control; floor 0.05 stays
+  within noise of it.
+- **Head to head, the control beats every floored copy** (1,800 matches per pair) and is the whole Nash mixture.
+
+![Card-floor arms against the scripted bot](docs/figures/floor_ablation.png)
+- **Not decided yet:** the deciding exploitability test (8 attackers) is still queued, and a second family
+  (the same floors trained from scratch to 2.5B) is still training.
+
+![Round robin of the card-floor ablation](docs/figures/stage5_round_robin.png)
+
+| row beats column | control | floor 0.05 | floor 0.10 | floor 0.20 | Elo |
+|---|---|---|---|---|---|
+| control | – | **0.679** | **0.686** | **0.819** | 1634 |
+| floor 0.05 | 0.321 | – | 0.427 | 0.713 | 1493 |
+| floor 0.10 | 0.314 | 0.573 | – | 0.734 | 1523 |
+| floor 0.20 | 0.181 | 0.287 | 0.266 | – | 1349 |
+
+**6. <a id="humans"></a>Humans.**
+- 20 ranked matches from 4 players, 2026-11-06 to 11-09: humans won 3 and lost 17, a human score of **0.15**
+  [0.05, 0.36]. Two players played 16 of the 20, so the matches are not fully independent.
+- 16 of the 20 were played before a fix that removed up to 0.5 s of input delay for humans.
+
+![Humans against the agent](docs/figures/human_play.png)
+
+**7. Language models.** Claude models have played earlier agents of this project through the text interface
+(`pufferroyale/llm.py`); games against this agent are planned. Results will be added here.
+
+### Compute
+
+All training ran on NYU's Torch cluster, one GPU per job (A100 80GB, H100 80GB, H200).
+
+- **The released model:** 188.7 GPU-hours on one A100 (about 14,800 steps/s).
+- **Logged items:** setup and calibration (4.6), stage 1 (20.7), throughput work (6.0), stage 3 (200.2), the
+  stage-3 attacker calibration (10.3), the released model (188.7), the stage-3b attackers (55.8) and stage 4a
+  (70.4) sum to about **560 GPU-hours**.
+- **Unlogged runs:** the stage-2 and stage-3 attacker probes (estimated at about 60 and 56-110 GPU-hours),
+  most stage-4 runs and stage 4b have no logged total, so the true total is higher.
+
+Per-job GPU-hours are in [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
+
+### Limitations
+
+- **Not checked against real matches.** The engine follows RoyaleSim's measured ledger, but no comparison with
+  recordings of real matches was done. 64 of about 123 regular cards are modelled, with no Evolutions,
+  Champions or Heroes. All cards are level 11, the agent trained with Princess towers only, and the arena is
+  the 2018 map. The full list is in [`docs/FIDELITY.md`](docs/FIDELITY.md).
+- **Exploitability is a lower bound**, measured on the 7.81B checkpoint, not the released 10B one. Best-response
+  scores were not monotone in the attacker's budget, and many copy-start attackers drifted below 0.5 for reasons
+  not established.
+- **One selection rule was settled after seeing results** (see result 3). Several ablations have one seed, and
+  the same configuration with seed 0 ranked last of 9 by Elo: seeds matter.
+- **Not bit-reproducible on GPU.** Training uses non-deterministic cuDNN, which is about 45× faster. The engine
+  itself is deterministic.
+- **Small human sample** (20 ranked matches), most of them with an input-delay handicap.
+- **The scripted heuristic bot** was used while tuning hyperparameters, so it is not a fully unseen benchmark.
+
+---
+
+## Build, test and reproduce
+
+```bash
+make build && make test-c                       # engine + C unit tests (and `make asan` under sanitizers)
+python -m pytest tests -q                       # builder + independent spec test suites
+python -m pytest hpc/tests advisor/tests -q     # cluster tools and advisor
+```
+
+**Retrain the released model.** These are the exact settings, run on the cluster with `hpc/league.sbatch` in
+13 links of 20 h on one A100:
+
+```bash
+RUN_ID=S4_A_s1 SEED=1 ANCHORS=none SELF_PLAY_FRAC=1.0 ANCHOR_FRAC=0 PFSP=hard MMD_COEF=0 \
+TOTAL=10000000000 NUM_ENVS=256 BATCH_SIZE=16384 MINIBATCH_SIZE=1024 SNAPSHOT_INTERVAL=477 MAX_SNAPSHOTS=64 \
+EXTRA_ARGS="--train.torch-deterministic= --env.reward-tower 0.3 --env.reward-crown 0.2 --env.reward-elixir 0.01 \
+  --train.reward-clip 0 --shaping-anneal-frac 0.05 --env-threads 16 --fast-opponents --cuda-graphs \
+  --env.deck-pool hog26;giant;bait;golem;lavaloon;miner_poison;pekka_bridge --env.random-deck-frac 0.5 \
+  --env.heldout-decks xbow;royal_hogs;random:50:20261003 --env.deck-draw independent \
+  --card-floor 0.005 --card-floor-steps 5000000000" \
+sbatch hpc/league.sbatch
+```
+
+The run's full configuration is [`models/S4_A_s1_10B/config.json`](models/S4_A_s1_10B/config.json). For every
+command-line tool (train, evaluate, watch, league, best response, tournament, LLM matches) and the Python API,
+see [`docs/DEVELOPING.md`](docs/DEVELOPING.md). For the cluster, see [`docs/HPC_HANDOFF.md`](docs/HPC_HANDOFF.md)
+and [`hpc/README.md`](hpc/README.md). The figures are rebuilt from the run outputs by
+[`docs/figures/make_figures.py`](docs/figures/make_figures.py).
+
+---
+
+## Repository layout
+
+```
+pufferroyale/   the simulator: C engine (csrc/), Python bindings, PufferLib env, policy, league, metagame, LLM text interface
+models/         the released agent (S4_A_s1_10B.pt), its run config and model card
+play/           the browser game: server, page, cluster job, permanent link, voice worker
+advisor/        the advisor for the real game: perception, tracker, encoder, policy, overlay, app (+ its tests and jobs)
+scripts/        command-line tools: train, league_train, eval, watch, best_response, tournament, llm_match, ...
+hpc/            NYU Torch cluster: Apptainer image, Slurm templates, stage and Claude-game tools
+tests/          C tests, builder tests, the independent spec tests, golden hashes
+tools/          card / arena table generators, raylib download
+data/source/    pinned inputs from RoyaleSim (with provenance and licence)
+docs/           specification, fidelity notes, decisions, experiment logs, guides, figures (index: docs/README.md)
+```
+
+---
+
+## Citing, licence and acknowledgements
+
+If you use PufferRoyale, please cite it ([`CITATION.cff`](CITATION.cff)):
+
+```bibtex
+@software{gupta2026pufferroyale,
+  author = {Gupta, Aditya},
+  title  = {PufferRoyale: a deterministic 1v1 Clash Royale-style battle simulator and league self-play agents},
+  year   = {2026},
+  url    = {https://github.com/Aditya-Gupta26/PufferRoyale}
+}
+```
+
+- **Licence:** MIT ([`LICENSE`](LICENSE)), for the code and the released model.
+- **Third-party material:**
+  - `pufferroyale/env_binding.h` comes from PufferLib (MIT, `pufferroyale/PUFFERLIB_LICENSE`);
+  - the card and arena data come from RoyaleSim (MIT, `data/source/ROYALESIM_LICENSE`); the card numbers
+    themselves are Supercell's.
+- **Built on:** [PufferLib](https://github.com/PufferAI/PufferLib) and [RoyaleSim](https://github.com/RoyaleGym/RoyaleSim).
+  The advisor uses [ClashRoyaleBuildABot](https://github.com/Pbatch/ClashRoyaleBuildABot)'s detector and the
+  [Clash Royale detection dataset](https://github.com/wty-yy/Clash-Royale-Detection-Dataset) of KataCR for its
+  accuracy check. Training ran on NYU's Torch cluster.
+- **Not affiliated with Supercell.** Clash Royale is a trademark of Supercell.

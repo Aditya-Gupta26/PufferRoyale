@@ -27,6 +27,14 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     MANIFEST.in /opt/pufferroyale/MANIFEST.in
     README.md /opt/pufferroyale/README.md
 
+%setup
+    # Mount points for the NYU Torch site bind paths (/scratch, /projects, /share/apps, /mnt,
+    # /state/partition1): the writable build sandbox cannot create bind destinations, and a %post
+    # that gets one of these binds fails ("destination /scratch doesn't exist in container").
+    # Empty directories; harmless elsewhere (DECISIONS D79).
+    mkdir -p "${APPTAINER_ROOTFS}/scratch" "${APPTAINER_ROOTFS}/projects" "${APPTAINER_ROOTFS}/share/apps" \
+        "${APPTAINER_ROOTFS}/mnt" "${APPTAINER_ROOTFS}/state/partition1"
+
 %environment
     export LC_ALL=C.UTF-8
     export LANG=C.UTF-8
@@ -37,6 +45,9 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 %post
     set -e
     export DEBIAN_FRONTEND=noninteractive
+    # Torch has no /etc/subuid entries, so --fakeroot runs %post in a root-mapped user namespace
+    # where apt cannot switch to its _apt sandbox user (DECISIONS D79)
+    echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00no-sandbox
     apt-get update
     apt-get install -y --no-install-recommends software-properties-common ca-certificates curl git \
         build-essential clang

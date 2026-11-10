@@ -22,6 +22,8 @@ endif
 CSRC := pufferroyale/csrc
 BUILD := build/c
 CWARN := -std=c99 -Wall -Wextra -Werror -Wshadow
+# libm: the work package's C tests call pow(); macOS links it implicitly, Linux needs it (DECISIONS D80)
+LDLIBS ?= -lm
 CTESTS := $(patsubst tests/c/%.c,%,$(filter-out tests/c/bench.c,$(wildcard tests/c/test_*.c)))
 HEADERS := $(wildcard $(CSRC)/*.h) tests/c/pr_test.h
 
@@ -47,11 +49,11 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/%: tests/c/%.c $(HEADERS) | $(BUILD)
-	$(CC) $(CWARN) -O2 -I$(CSRC) -Itests/c $< -o $@
+	$(CC) $(CWARN) -O2 -I$(CSRC) -Itests/c $< -o $@ $(LDLIBS)
 
 $(BUILD)/asan_%: tests/c/%.c $(HEADERS) | $(BUILD)
 	$(CC) $(CWARN) -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined \
-		-fno-sanitize-recover=undefined -I$(CSRC) -Itests/c $< -o $@
+		-fno-sanitize-recover=undefined -I$(CSRC) -Itests/c $< -o $@ $(LDLIBS)
 
 # Every test binary runs under a hard wall-clock limit (perl alarm: SIGALRM after
 # TEST_TIMEOUT s), so a hang can never stall a run. ASan reports are not symbolized by default
@@ -68,13 +70,13 @@ asan: $(addprefix $(BUILD)/asan_,$(CTESTS))
 	@set -e; for t in $(CTESTS); do echo "== asan $$t"; $(ASAN_ENV) $(WITH_TIMEOUT) ./$(BUILD)/asan_$$t; done
 
 $(BUILD)/bench: tests/c/bench.c $(HEADERS) | $(BUILD)
-	$(CC) $(CWARN) -O2 -I$(CSRC) -Itests/c $< -o $@
+	$(CC) $(CWARN) -O2 -I$(CSRC) -Itests/c $< -o $@ $(LDLIBS)
 
 bench: $(BUILD)/bench
 	./$(BUILD)/bench
 
 $(BUILD)/bench_stress: tests/c/bench_stress.c $(HEADERS) | $(BUILD)
-	$(CC) $(CWARN) -O2 -I$(CSRC) -Itests/c $< -o $@
+	$(CC) $(CWARN) -O2 -I$(CSRC) -Itests/c $< -o $@ $(LDLIBS)
 
 bench-stress: $(BUILD)/bench_stress
 	./$(BUILD)/bench_stress

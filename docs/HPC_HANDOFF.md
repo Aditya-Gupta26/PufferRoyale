@@ -706,7 +706,8 @@ done
 **E1. Exploitability (headline).**
 1. **Calibrate the BR budget** first, on `A_s0`'s final policy: 50M, 150M and 400M steps. Pick the
    smallest budget where `br_score` gains < 0.02 at the next level. Record it.
-2. **Probe.** For each of the 9 final policies, with BR seeds 0 and 1:
+2. **Probe.** For each of the 9 final policies, and for S3_Clo_s0 and S3_Chi_s0 (D96, reported
+   separately), with BR seeds 0 and 1:
 
    ```bash
    run python scripts/best_response.py --target $DATA_DIR/league/<run> --device cuda \
@@ -773,8 +774,10 @@ snapshot wins, and the number of cyclic triads.
 ## 11. Phase 8: Stage 4, the general policy
 
 TRAINING_PLAN §8.4 has the reasoning; this is the procedure.
-- **Method:** the stage-3 winner (E1 first, then E2).
-- **Start:** `--init-from <the winning method's best final model>` (a new run).
+- **Method:** the stage-3 winner (E1 first, then E2). Optionally later, if time permits, the other
+  two methods as well, with the same settings (D96).
+- **Start:** random initialisation (D93). No `--init-from`; a warm start is only an optional
+  comparison arm (TRAINING_PLAN §8.4).
 - **Decks** (pass them in `EXTRA_ARGS`; `config.json` records the expanded deck lists):
 
   ```bash

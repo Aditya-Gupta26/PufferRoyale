@@ -28,9 +28,18 @@ exploitability_proxy = 2 * br_score - 1 (0 = the BR cannot beat the target, 1 = 
 a lower bound on the target's exploitability, only as tight as the BR training). The JSON is the
 last stdout line and is also written to --out. BR weights are kept only with --data-dir
 (<data-dir>/best_response/<run_id>/br.pt).
+
+--wandb --wandb-project P --wandb-group G --tag T --no-model-upload (league_train.py's logging flags;
+WANDB_MODE=offline works without network; without --wandb, wandb is never imported): one log call per
+training epoch at step = global step (epoch, sps, losses/*, results/<target>/score and games of the
+epoch's finished training matches, train_score_vs_target, PuffeRL's environment/* stats); during the
+evaluation the run summary holds the running eval/matches, eval/wins, eval/draws, eval/losses and
+eval/br_score (every 50 matches), and at the end final/br_score, final/exploitability_proxy, final/wins ...
+Logging only reads the trainer: the BR's weights and result are the same with or without --wandb.
 """
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -73,6 +82,14 @@ def make_parser():
                          "(default 0 = constant)")
     ap.add_argument("--data-dir", help="keep the BR weights under <data-dir>/best_response/<run_id>/")
     ap.add_argument("--verbose", action="store_true", help="print a progress line per epoch")
+    # D90 throughput paths for the BR's training phase (as league_train.py; all off by default). The evaluation
+    # matches always use the plain forward (the learner graph is removed before them).
+    ap.add_argument("--env-threads", type=int, default=0,
+                    help="step the training envs on N threads (bit-identical to 0; D90)")
+    ap.add_argument("--fast-opponents", action=argparse.BooleanOptionalAction, default=False,
+                    help="GPU observations, GPU opponent sampling and vmapped checkpoint opponents (D90)")
+    ap.add_argument("--cuda-graphs", action=argparse.BooleanOptionalAction, default=False,
+                    help="replay the learner's and opponents' no-grad forwards from CUDA graphs (D90)")
     return ap
 
 
@@ -123,7 +140,9 @@ def main():
              deck0=known.deck0, deck1=known.deck1, bptt_horizon=known.bptt_horizon, learning_rate=known.learning_rate,
              frame_skip=env_over.get("frame_skip"), shaping_anneal_frac=known.shaping_anneal_frac,
              rnn=(target_rnn is not None) if known.init_from_target else known.rnn, snapshot_interval=0, mmd_coef=0.0,
-             anchors=f"ckpt:{target}", self_play_frac=0.0, anchor_frac=1.0)
+             anchors=f"ckpt:{target}", self_play_frac=0.0, anchor_frac=1.0,
+             env_threads=int(known.env_threads), fast_opponents=bool(known.fast_opponents),
+             cuda_graphs=bool(known.cuda_graphs))
     ini = LT.load_ini(rest)
     try:
         LT.fix_anneal_steps(a, known)                     # SPEC §19.10.1: exact N, recorded in config.json
@@ -133,6 +152,7 @@ def main():
                         seed=known.seed)
     torch.manual_seed(known.seed)
     np.random.seed(known.seed)
+    wb = None
     try:
         LT.build_config(a, ini, run_dir)                  # size / total checks before anything starts
         arch = dict(policy_kwargs=target_kw, rnn_kwargs=target_rnn) if known.init_from_target else {}
@@ -146,18 +166,38 @@ def main():
             warn_shaping_clip(env_used, cfg.get("reward_clip", 1.0), "br")
             if known.init_from_target:                    # SPEC §19.7.9: start from the target's weights
                 policy.load_state_dict({k: v.to(next(policy.parameters()).device) for k, v in target_sd.items()})
+            from pufferroyale.league import policy_architecture
+            config = {"policy": policy_architecture(policy)[0], "rnn_name": "Recurrent" if a["rnn"] else None,
+                      "rnn": target_rnn if (known.init_from_target and target_rnn) else ini["rnn"],
+                      "env": env_used, "league": a}
             if keep:
                 from pufferroyale.decks import expanded_deck_sets
-                from pufferroyale.league import policy_architecture
                 env_used.update(expanded_deck_sets(env_used))            # SPEC §19.10.5
                 with open(os.path.join(run_dir, "config.json"), "w") as f:
-                    json.dump({"policy": policy_architecture(policy)[0], "rnn_name": "Recurrent" if a["rnn"] else None,
-                               "rnn": target_rnn if (known.init_from_target and target_rnn) else ini["rnn"],
-                               "env": env_used, "league": a}, f, indent=2, default=str)
+                    json.dump(config, f, indent=2, default=str)
+            wb = LT.make_wandb(ini, dict(config, train={k: v for k, v in cfg.items()
+                                                        if isinstance(v, (int, float, str, bool))},
+                                         br={"target": target, "seed": int(known.seed), "matches": int(known.matches),
+                                             "init_from_target": bool(known.init_from_target)}))
+            spec = f"ckpt:{target}"
+            t_train, s_train = time.time(), trainer.global_step
             while trainer.global_step < known.total_timesteps:
                 trainer.last_log_time = -1e18
                 trainer.evaluate()
-                trainer.train()
+                logs = trainer.train()
+                if wb is not None:                        # read-only: the same weights with or without --wandb
+                    games = score = 0
+                    for _, res, _ in lv.drain_results():
+                        games, score = games + 1, score + 0.5 * (res + 1)
+                    losses = {k: float(v) for k, v in trainer.losses.items()}
+                    sps = (trainer.global_step - s_train) / max(time.time() - t_train, 1e-9)
+                    rec = {"epoch": int(trainer.epoch), "global_step": int(trainer.global_step), "sps": round(sps, 1),
+                           "losses": {k: (v if math.isfinite(v) else None) for k, v in losses.items()},
+                           "results": {spec: {"games": games, "score": score / games}} if games else {},
+                           "pool_size": 1}
+                    st = pool.stats().get(spec, {})
+                    wb.log(dict(LT.wandb_record(rec, logs), train_score_vs_target=float(st.get("p", 0.5)),
+                                train_games_vs_target=int(st.get("games", 0))), int(trainer.global_step))
                 if known.verbose:
                     st = pool.stats().get(f"ckpt:{target}", {})
                     print(f"[br] step {trainer.global_step:>8d} epoch {trainer.epoch:>4d} "
@@ -166,6 +206,9 @@ def main():
             trainer.utilization.stop()
             lv.close()
         train_stats = pool.stats().get(f"ckpt:{target}", {"games": 0, "p": 0.5})
+        if known.cuda_graphs:
+            from pufferroyale.fast_league import uninstall_learner_graph
+            uninstall_learner_graph(policy)               # evaluation runs the plain forward (batch 1)
         policy.eval()
         if keep:
             torch.save(LT.cpu_state(policy), os.path.join(run_dir, "br.pt"))
@@ -183,6 +226,9 @@ def main():
                 r = -mg.play_match(target, policy, decks[0], decks[1], s, greedy=known.greedy, device=known.device,
                                   **match_kw)
             w, d, l = w + (r > 0), d + (r == 0), l + (r < 0)
+            if wb is not None and ((k + 1) % 50 == 0 or k + 1 == known.matches):
+                wb.run.summary.update({"eval/matches": k + 1, "eval/wins": int(w), "eval/draws": int(d),
+                                       "eval/losses": int(l), "eval/br_score": (w + 0.5 * d) / (k + 1)})
         n = max(1, known.matches)
         br_score = (w + 0.5 * d) / n
         result = {
@@ -198,6 +244,15 @@ def main():
             "br_checkpoint": os.path.join(run_dir, "br.pt") if keep else None,
             "elapsed_s": round(time.time() - t0, 2),
         }
+        if wb is not None:
+            wb.run.summary.update({f"final/{k}": result[k] for k in ("br_score", "exploitability_proxy", "wins", "draws",
+                                                                     "losses", "total_timesteps", "train_score_vs_target")})
+            wb, run_wb = None, wb
+            run_wb.close(result["br_checkpoint"], early_stop=False)
+    except BaseException:
+        if wb is not None:
+            wb.abort()
+        raise
     finally:
         if not keep:
             shutil.rmtree(run_dir, ignore_errors=True)

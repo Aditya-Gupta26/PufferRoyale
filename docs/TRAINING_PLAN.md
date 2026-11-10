@@ -30,8 +30,10 @@ course's game-theory questions:
 | 1 | **Bot ladder** (calibration only) plus ablations | Hog 2.6 mirror | Scripted bots: do-nothing → random → heuristic | Proof that learning works; fixed hyperparameters; ablation results |
 | ~~2~~ | ~~Self-play warm-started from stage 1~~ | – | – | **Removed:** it became run A of stage 3 |
 | 3 | **Course comparison** A / B / C, **all from random init**, 3 seeds each | Hog 2.6 mirror | A: current self only. B: self + past snapshots (PFSP). C: B + MMD. **No scripted bots** | Exploitability, head-to-head, transitivity (RQ1, RQ2) |
-| 4 | **General policy** with the stage-3 winner | 50% real-deck pool + 50% random decks, held-out decks | As the winning method; no anchors by default | Held-out-deck generalisation; deck meta-game Nash (RQ3) |
-| 5 | Stretch | – | – | Tower troops, deck-level PSRO, LLM matches (needs approval), fidelity checks |
+| 4 | **General policy** with the stage-3 winner, **from random init** (D93); later, if time permits, also the other two methods (D96) | 50% real-deck pool + 50% random decks, held-out decks | As the winning method; no anchors by default | Held-out-deck generalisation; deck meta-game Nash (RQ3); periodic Hog-mirror check against the frozen stage-3 specialists |
+| 4o | **Deck specialists** (proposal, D94): 1–5 fixed own decks | Own seat: one fixed deck. Opponent seat: the stage-4 deck mix (pool + random; held-out decks excluded) | Frozen stage-4 generalist snapshots (PFSP); no self-play | The best known way to play deck D against the field; the specialist-vs-generalist gap per deck |
+| 5 | Stretch | – | – | Tower troops, deck-level PSRO, LLM matches (needs approval), fidelity checks; **Champions, Evolutions and Heroes last, if time permits** (D95) |
+| (parallel) | **Card batch 3** (proposal, D95, §8.6): ~20–25 more cards from the 58 already in the repo data | – | – | A larger roster for a later stage-4 run; Stage 4 itself starts on the 64 cards |
 
 **Principles we agreed on**
 1. **Zero-sum stays exact.** Every reward term is antisymmetric, and shaping is potential-based.
@@ -42,7 +44,11 @@ course's game-theory questions:
    evaluation-only from stage 3 on. The headline metric is exploitability, measured by
    best-response probes.
 4. **Stage 1 is calibration only.** Its checkpoints never start a later stage.
-5. **Master one deck first** (the Hog 2.6 mirror, stages 1–3), then scale to many decks (stage 4).
+5. **Master one deck first** (the Hog 2.6 mirror, stages 1–3), then scale to many decks (stage 4),
+   then specialise per deck against the field (stage 4o).
+6. **Narrow-deck weights never start a multi-deck stage (D93).** Stage-3 weights carry Hog-2.6-only
+   card and strategy bias. They serve stage 4 as frozen evaluation opponents, not as its starting
+   point.
 
 ---
 
@@ -64,9 +70,13 @@ course's game-theory questions:
 | T12 | Stage 1 = **calibration only** (pipeline check, hyperparameters, ablations); old stage 2 removed | Follows from T11 |
 | T13 | Evaluation bots must be **unseen** by the evaluated policies. With T10–T11, the heuristic and random bots qualify for stage 3 | Fair, readable strength numbers |
 | T14 | The proposed **lookahead (search) evaluation bot is dropped** (see §12) | Not needed: exploitability is the headline, and the unseen heuristic/random bots cover readable strength |
-| T15 | Stage 4 uses the stage-3 winner, a 50% real-deck pool + 50% random decks, and held-out decks; warm-started from the best stage-3 policy | Generalisation plus the deck meta-game (RQ3) |
+| T15 | Stage 4 uses the stage-3 winner, a 50% real-deck pool + 50% random decks, and held-out decks; **from random init** (D93; this replaced the original warm start from the best stage-3 policy) | Generalisation plus the deck meta-game (RQ3). A Hog-only warm start would bias both the cards the policy reads well and the deck meta-game (§8.4) |
 | T16 | GPU budget: up to **~16 GPUs concurrently** (about 16 GPU-days per day at best) | GPU-hours are not the binding constraint. CPU cores per job and queue wait are |
 | T17 | Spend the headroom on **3 seeds** per stage-3 method, parallel stage-1 ablations, and several best-response probes per policy | Statistical strength for the headline results |
+| T18 | The frozen stage-3 finals are a **periodic stage-4 evaluation**: the stage-4 policy pilots Hog 2.6 against them in the Hog 2.6 mirror (D93, 2026-10-05) | A clean specialist benchmark (the fair score is 0.5) that tracks how close the generalist gets to the one-deck specialists while it learns all 64 cards |
+| T19 | **Stage 4o, deck specialists** (proposal, D94, 2026-10-05): 1–5 fixed own decks against the stage-4 deck mix, piloted by frozen stage-4 snapshots. Order: stage 3 → E1 → stage 4 → stage 4o | A policy that is the best known way to play one deck against any card, and a measure of what generality costs on that deck. It needs strong random-deck pilots, which only exist after stage 4 |
+| T21 | **E1 also probes S3_Clo_s0 and S3_Chi_s0; stage 4 may later run all three methods (D96, 2026-10-07).** The extra probes (2 BR seeds each) give the exploitability-vs-MMD-strength curve and are reported separately. Stage 4 trains the winner first; A, B and C on the full-card setup follow only if time permits | Clo/Chi turn the MMD sweep (0 / 0.01 / 0.05 / 0.1 on seed 0) into an exploitability curve. All three methods at stage 4 test whether the stage-3 ranking holds with 64 cards |
+| T20 | **Card roster (D95, 2026-10-05).** Champions, Evolutions and Heroes are deferred to the very end (stage 5, if time permits). Card batch 3 (~20–25 of the 58 cards already in the repo data, in parallel with stage 4) is proposed, awaiting approval (§8.6) | The special forms need an ability action, cycle counters, deck-slot rules, a new layout and new data. Plain cards fit the existing 128 card ids, and their data is already in the repo |
 
 Items introduced in this document that we did **not** discuss explicitly are listed in §13 for
 your review. Each is small and reversible.
@@ -350,7 +360,8 @@ Today `pufferroyale/torch.py` uses one `Linear(hidden, 2305)` actor over the joi
    already does.
 3. **`league_train.py --init-from CKPT`:** start a **new** run from given weights only (new pool,
    new optimizer). Needed to chain the stage-1 ladder (pool settings cannot change on `--resume`)
-   and for the stage-4 warm start.
+   and for the optional stage-4 warm-start comparison arm (stage 4 itself starts from random init,
+   D93).
 4. **Stage runner `scripts/stages.py`:** runs the bot ladder as chained `league_train.py` runs (one
    anchor per rung, `--init-from` the previous rung), checks each gate on `history.jsonl`, and
    stops at the first failure with a report.
@@ -580,18 +591,44 @@ longer exists separately.
 
 ### 8.4 Stage 4: general policy (RQ3)
 - **Method.** The stage-3 winner, by E1 (exploitability) first and E2 (head-to-head) second.
-- **Starting point.** Warm start from that method's best final policy (lowest exploitability). If
-  the transfer clearly hurts, train from scratch with the same method.
+- **Optional extension: all three methods (D96, 2026-10-07; only if time permits).** The winner's
+  stage-4 run comes first. Afterwards, the other two methods may also be trained on the full-card
+  setup, with the same decks, budget, seeds and evaluation. Every method then has a stage-4 policy,
+  so the A/B/C comparison (RQ1, RQ2) can be repeated at full-card scale. It also shows whether the
+  stage-3 ranking survives the move from one deck to 64 cards. Nothing about the winner's run
+  depends on it.
+- **Starting point: random initialisation (D93, 2026-10-05).** This replaces the original warm start
+  from the best stage-3 policy. Reasons, checked on S3_C_s0's final model:
+  - **Card bias.** Only the 8 Hog 2.6 cards were ever trained. Their 16-d embedding rows shrank to
+    norm 1.1–1.9 (mean 1.46). The other 56 cards' rows never received a gradient and sit at norm
+    ≈ 4.0, exactly an untouched N(0, 1) init. Every new card would enter as an unfamiliar vector
+    about 2.8× larger than anything the network learned to read. The card-stat projection was also
+    fit on those 8 cards only.
+  - **Strategy bias.** The stage-3 policies play a Hog-mirror-specific game: Ice Spirit and Skeletons
+    played at ~95% of their affordable decisions, Fireball almost never, games played for the
+    tiebreak. Their action entropy ended at ~0.42–0.54 (vs ~1.42 at init), so they explore new cards
+    little.
+  - **RQ3 contamination.** The deck meta-game pilots every deck with the stage-4 policy. A pilot
+    with ~1B extra steps of Hog 2.6 practice would make Hog 2.6 look stronger than it is.
+  - **The head start is small.** From scratch, stage 1 reached 0.90 vs the heuristic bot in
+    7.4–11.5M steps, about 1% of the stage-4 budget.
+  - **Optional comparison arm.** One warm-start run at the same budget measures the transfer directly
+    (possibly softened: re-initialise the card embedding, the stat projection and the heads, or
+    "shrink and perturb" the weights). If it runs, compare per-card play rates and Hog 2.6's
+    meta-game score between the warm and scratch runs; a higher Hog 2.6 score under the warm start
+    shows the pilot bias.
 - **Decks (§5) [WP].**
   - `deck_pool` = the 7 pool presets;
   - `random_deck_frac 0.5`;
   - `heldout_decks` = `xbow`, `royal_hogs` + 50 seeded random decks;
   - seats draw independently.
-- **Opponents.** As the winning method, now with sampled decks. Early snapshots (Hog-only skill)
-  are easy sparring partners that newer snapshots soon outnumber.
+- **Opponents.** As the winning method, now with sampled decks. The stage-3 policies are never
+  training opponents (they stay unseen for the specialist check below).
 - **No anchors by default**, which keeps the bots unseen for evaluation. If forgetting of simple
   play shows up, a small anchor share may be added, and the bot numbers are then reported as "seen".
 - **Card stats on.** One short ablation without them (S4-nostats) is optional.
+- **Roster:** the 64 engine cards. A later run may use a larger roster if card batch 3 lands (§8.6,
+  D95); stage 4 does not wait for it.
 - **Budget:** 1–2B learner steps, 2 seeds if affordable.
 - **Evaluation.**
   1. **Generalisation:** score vs the heuristic and random bots on pool decks vs held-out decks,
@@ -602,10 +639,62 @@ longer exists separately.
        presets (≥ 200 matches per pair, half per seat), which gives the deck-vs-deck score matrix
        and its Nash mixture: "the meta according to our engine";
      - compare it with real-game deck usage.
-  3. **Optional:**
+  3. **Specialist check (periodic, D93).** Every K epochs during training, and on the final model:
+     the stage-4 policy pilots Hog 2.6 against the frozen stage-3 finals, also on Hog 2.6, both seats.
+     The stage-3 policies can pilot only Hog 2.6, so this is always the Hog mirror, where the fair
+     score is exactly 0.5. A score below 0.5 is the generalist's gap to the one-deck specialists;
+     0.5 means it caught up while learning all 64 cards. K, the opponent set (e.g. each method's best
+     final) and the match count are fixed in the stage-4 pre-registration.
+  4. **Optional:**
      - a best response on a held-out-deck mirror;
      - the stage-3 policies played with other decks (they should be much weaker, which motivates
        stage 4).
+
+### 8.4o Stage 4o: deck specialists (proposal, D94)
+_Proposal agreed on 2026-10-05. Not pre-registered and not implemented. The settings below are a
+starting point for its own pre-registration._
+- **Goal.** For a fixed deck D, the best known way to play D against the field, where any of the 64
+  cards can appear in the opponent's deck. It is less general than the stage-4 policy (it pilots
+  only D), but its own side needs only one game plan, so it should play D better at a given budget.
+- **Order.** Stage 3 → E1 → stage 4 → stage 4o. It needs strong pilots for the opponent's decks,
+  which exist only after stage 4.
+- **Learner seat.** One fixed deck D. One network per deck is the clean version; one network for up to
+  5 decks is a variant.
+- **Which decks (1–5).** Chosen from the stage-4 deck meta-game (e.g. its Nash-supported decks) and
+  decks of interest, for example Hog 2.6 (stage-3 specialists exist for comparison) and Log Bait
+  (Route-1 match 2).
+- **Opponent seat.**
+  - **Decks:** the stage-4 mix (real-deck pool + random decks from all 64 cards). Held-out decks stay
+    out of training and are kept for evaluation. The real decks keep the field coherent: uniformly
+    random decks are often unplayable (e.g. three spells and no win condition), and training mostly
+    against them would overrate the specialist.
+  - **Pilots:** frozen stage-4 generalist snapshots, sampled by PFSP ("hard"). Not self-play: the
+    learner never pilots the opponent's decks. Not scripted bots: they are too weak, and the specialist
+    would learn to beat bad pilots instead of strong decks.
+- **Game-theoretic reading.** A best response to a population (deck distribution × pilot snapshots),
+  like AlphaStar's exploiter agents (Vinyals et al., 2019) with a fixed deck. It is best against that
+  field, not against every possible opponent.
+- **Starting point (open).** Random init, or the stage-4 generalist. The generalist was trained on all
+  64 cards, so it lacks the narrow-deck bias of D93, but it carries the generalist's habits. Decide at
+  pre-registration, possibly from a short pilot of both.
+- **Budget (open).** Probably below stage 4's, since one side's deck is fixed. A short pilot measures
+  the learning curve and throughput first.
+- **Risks.**
+  - **Pilot quirks:** frozen pilots can be overfit. Use several snapshots (PFSP) and evaluate against
+    snapshots it never trained against.
+  - **Robustness:** an adapting opponent can still find holes. An optional best response against the
+    specialist measures this.
+- **Evaluation.**
+  1. **Specialisation gain:** the specialist and the stage-4 generalist each pilot D against the same
+     opponent field (pool decks and held-out decks, same pilots), ≥ 500 matches per seat and deck
+     set. The difference is what generality costs on deck D.
+  2. **Head-to-head on D:** specialist vs generalist in the D mirror (fair score 0.5).
+  3. **Per-opponent-deck scores:** D against each preset and the held-out decks, a deck-level
+     complement to the RQ3 meta-game.
+  4. **Hog 2.6 only:** the specialist against the stage-3 finals in the Hog mirror, which puts three
+     generations of Hog players (stage-3 specialists, stage-4 generalist, stage-4o specialist) on one
+     scale.
+  5. **Optional:** a best response against the specialist.
 
 ### 8.5 Stage 5: stretch (as time allows)
 - **Tower-troop variety:** Cannoneer, Dagger Duchess, Royal Chef.
@@ -617,10 +706,80 @@ longer exists separately.
 - **LLM-vs-bot / LLM-vs-policy matches** (`scripts/llm_match.py`): **only with your approval**,
   since it needs network and API use.
 - **Fidelity checks** against recorded real matches (start elixir, lockout, tiebreak, speeds).
+- **Champions, Evolutions and Heroes (D95): last, only if time permits.** These are the real game's
+  special card forms (§8.6). They need the largest changes: an "activate ability" action in the
+  action space (the policy head changes), per-match cycle counters, deck-slot rules, a new
+  observation layout (they don't fit the 128 card ids), and data the repo doesn't have.
+
+### 8.6 Card roster expansion (D95, 2026-10-05)
+_Discussion of 2026-10-05. Card batch 3 below is a **proposal awaiting approval**; the deferral of
+Champions, Evolutions and Heroes is decided. Nothing is implemented._
+
+**The real game vs our engine (checked 2026-10-05).**
+- **Real game:** about 123 regular cards, plus 8 Champions, 43 Evolutions, 18 Heroes and 4 tower
+  troops (deckshop.pro card list; other sites count 127). Since March 2026 a deck's 8 cards
+  include 3 special slots: 1 Evolution, 1 Hero, 1 Wild (either).
+  - **Champions:** a separate rarity with an activatable ability that costs elixir, e.g. Golden
+    Knight's Dashing Dash for 1 elixir. One per deck, and no second Champion while one is alive.
+  - **Evolutions:** a stronger form of an existing card with no button. It appears automatically
+    after the card has been cycled 1–2 times in the match (e.g. Evolved Skeletons: shield plus extra
+    skeletons).
+  - **Heroes:** an existing card placed in the Hero slot gains a Champion-style ability (e.g. Hero
+    Valkyrie: Wild Whirlwind).
+  - Since 2026-08-26, Champion and Hero abilities are single-use per deployment (Boss Bandit
+    excepted).
+- **Our engine:** 64 plain cards. `data/source/cards-15.535.json` (the live-2026 client, 15.535.29)
+  has 144 entries:
+  - 22 are event or hidden variants (e.g. "Super Knight", chess skins, "Global Lightning");
+  - **58 deck-legal cards have stats in the repo but no engine implementation;**
+  - Evolutions and Hero forms are excluded from that file ("evolutions and hero forms are excluded
+    from `cards`"), and a few cards released after that client are missing.
+- **Capacity:** `CARD_SLOTS = 128` (SPEC §16.4, "room for the full roster"), so 64 + 58 = 122 cards
+  fit without changing the observation or the network input. Evolutions and Heroes as extra ids
+  (122 + 43 + 18 = 183) would not.
+
+**The 58 cards by effort.** First pass: each card's source fields were compared with what
+`tools/gen_card_db.py` reads, against the engine's 7 spell types and 5 buffs. A per-card mechanics
+review comes first in any batch.
+- **Tier 1: closest to existing rules.** 20 troops/buildings with only standard fields.
+  - Small additions: Flying Machine (a plain flying shooter), Barbarian Hut (a spawner like
+    Tombstone), Goblin Drill (burrows like Miner).
+  - One new rule each: Executioner's returning axe, Fisherman's hook, Phoenix's rebirth egg, Elixir
+    Golem's elixir gift, Battle Healer's healing, Ram Rider's snare.
+  - The rest: Sparky, Bowler, Lumberjack, Hunter, Goblin Giant, Elite Archer, Electro Dragon,
+    Firecracker, Electro Spirit, Suspicious Bush, Berserker.
+- **Tier 2: staged or special behaviour.** 19 troops/buildings with extra behaviour fields (action
+  graphs, buff-on-hit, reflect, deploy damage). For example: Cannon Cart turning into a building,
+  Electro Wizard's stun on hit, Electro Giant's reflect, Mega Knight's landing damage, and Guards,
+  Dark Prince, Three Musketeers, Royal Recruits, Goblin Hut, Furnace, Goblin Cage.
+- **Tier 3: spells (11).** Mostly new mechanics: Rage, Tornado, Heal, Graveyard, Clone, Mirror,
+  Goblin Curse, Vines, Dark Magic, Merge Maiden. Royal Delivery is close to Goblin Barrel.
+- **Tier 4: Champions (8).** Golden Knight, Archer Queen, Skeleton King, Monk, Mighty Miner, Little
+  Prince, Goblinstein, Boss Bandit. They need the ability action and the one-Champion rule. Deferred
+  (D95).
+- **Tier 5: Evolutions and Heroes.** They need decoding from the client, deck-slot rules, cycle
+  counters and a layout change. Deferred (D95).
+
+**Proposed sequence (card batch 3 awaits approval).**
+1. Stage 4 starts on the 64 cards on schedule; nothing waits for new cards.
+2. In parallel, **card batch 3** as a new engine work package, done like batch 2 (SPEC §16):
+   - tier 1 plus the simpler spells, about 20–25 cards;
+   - spec first, every level-11 number self-checked, independent tests, a new golden reference.
+3. Later, a stage-4 run on the larger roster.
+4. Champions, Evolutions and Heroes last, in stage 5, only if time permits.
+
+**Constraints.**
+- This is engine work. The HPC agent may not change engine code, the spec, tests or the golden
+  reference, so it goes through the usual engine path (Track 1) with the user's approval.
+- **Engine freeze:** new cards land only after stage 3 and E1 (best responses must run on the
+  stage-3 engine), and they start a new engine lineage.
+- **Card coverage:** with 122 cards a random deck contains a given card about half as often (8/122
+  vs 8/64), so a stage-4 run on the larger roster needs roughly twice the steps for the same games
+  per card.
 
 ---
 
-## 9. Evaluation protocol (shared by stages 3–4)
+## 9. Evaluation protocol (shared by stages 3, 4 and 4o)
 
 **General rules**
 - **Sampled actions, both seats.** Policies are stochastic, and Nash policies in a hidden-information
@@ -638,7 +797,9 @@ longer exists separately.
 - **Training settings.** Evaluation uses each checkpoint's own training settings, which the tools
   read from `config.json`. Settings must be identical across A, B and C.
 
-**E1. Exploitability (headline).** For each of the 9 final stage-3 policies:
+**E1. Exploitability (headline).** For each of the 9 final stage-3 policies, and with the same
+protocol for S3_Clo_s0 and S3_Chi_s0 (D96: the MMD-strength curve, reported separately and never
+pooled into method C):
 - **Probe runs.** `best_response.py --target <final> --init-from-target` [WP], with 2 BR seeds.
 - **Evaluation matches.** `--matches 1000` (500 per seat), giving a 95% CI half-width of about
   ±0.03 on `br_score`.
@@ -687,7 +848,8 @@ forward per opponent group per step). GPU-hours = steps / S / 3600.
 | 3 | 9 runs + 2 MMD-sensitivity runs | 1B each = 11B | ≈ 205 |
 | 3 (E1) | 18 BR probes (+ calibration) | ~0.25B each ≈ 4.5B | ≈ 85 |
 | 4 | 1–2 runs + evaluation | 1.5B each ≈ 3B | ≈ 55 |
-| **Total** | | ≈ 25B | **≈ 490 GPU-h ≈ 20 GPU-days** |
+| 4o (proposal) | 1–5 deck specialists + evaluation | open: fixed after a pilot (below stage 4's per run) | – |
+| **Total** (stages 0–4) | | ≈ 25B | **≈ 490 GPU-h ≈ 20 GPU-days** |
 
 - **Wall clock, not GPU-days, is what binds.** With up to 16 concurrent GPUs, the total is spread
   over about 4 weeks of stages. One 1B-step run at 15k SPS is ~18.5 h. All stage runs go through
@@ -739,6 +901,7 @@ forward per opponent group per step). GPU-hours = steps / S / 3600.
 | Troop-damage / elixir-trade reward | Easy to farm (kills on throwaway units); ClashRoyaleEnv needed several patches |
 | Anchors (scripted bots) in stage-3 training | A second difference between A and B, and biased bot evaluations |
 | Warm-starting stage 3 from stage 1 | Would expose A to bots through its weights (T11) |
+| Warm-starting stage 4 from the best stage-3 policy (the original plan) | Hog-2.6-only card and strategy bias, and a Hog-favoured pilot would distort the RQ3 deck meta-game. Replaced by random init (D93); kept only as an optional comparison arm |
 | Random decks for the stage-3 comparison | Deck-luck noise, an unknown fair score, and all three methods probably still learning card basics when the budget ends |
 
 ---

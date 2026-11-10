@@ -728,6 +728,13 @@ class LeagueVecEnv:
     def _gather_obs(self) -> None:
         np.take(self.env.observations, self._learner_rows(), axis=0, out=self.observations, mode="clip")
 
+    # hooks of send(), overridden by pufferroyale.fast_league.FastLeagueVecEnv (opt-in, DECISIONS D90)
+    def _update_card_stats(self, learner_rows, actions) -> None:
+        self.card_stats.update(self.observations, actions)
+
+    def _vec_step(self) -> None:
+        self._binding.vec_step(self.env.c_envs)
+
     def _peek_all(self) -> None:
         for i, h in enumerate(self._handles):
             d = self._binding.env_log_peek(h)
@@ -793,12 +800,12 @@ class LeagueVecEnv:
         actions = np.asarray(actions).reshape(self.num_envs)
         n = self.num_envs
         learner_rows = self._learner_rows()
-        self.card_stats.update(self.observations, actions)   # the learner's decision observations
+        self._update_card_stats(learner_rows, actions)        # the learner's decision observations
         opp_actions = self._opponent_actions()
         full = self.env.actions
         full[learner_rows] = actions
         full[2 * np.arange(n) + (1 - self.seats)] = opp_actions
-        self._binding.vec_step(self.env.c_envs)
+        self._vec_step()
         self._tick += 1
 
         # learner's view of this step (before any seat change)

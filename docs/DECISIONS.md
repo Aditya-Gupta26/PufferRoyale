@@ -773,3 +773,727 @@ project owner was away; they are open for review.
   matches vs `bot:random` with the argmax, and 18/20 with the card-first rule (20/20 sampled).
   Over 4 matches the argmax chose a card 3 times in 1,440 decisions; the card-first rule chose
   one 187 times in 1,471.
+
+---
+
+## HPC agent decisions (NYU Torch, docs/HPC_HANDOFF.md, 2026-10-03)
+
+### D79 — Isolated Torch environment: Path A image, binds limited to $PR_ROOT, 75% GPU floor
+- **Path A (our Apptainer image).** `--fakeroot` builds work on Torch compute nodes (checked: an image
+  of the pre-v0.5 definition built there on 2026-09-27). The hosts (RHEL 10) have no gcc and no
+  CUDA/Python modules, so Path C is impractical. Path B, PufferDrive's pattern (a shared
+  `/scratch/$USER` miniforge + venv + overlay), would mean sharing tooling locations with
+  PufferDrive. Image: `$PR_ROOT/containers/pufferroyale.sif`, built by `hpc/build_image.sbatch` in
+  the job's node-local temp directory.
+- **Two cluster-only build fixes in `hpc/pufferroyale.def`:**
+  - `%setup` creates the site bind points (`/scratch`, `/projects`, `/share/apps`, `/mnt`,
+    `/state/partition1`). The writable build sandbox cannot create bind destinations, and `%post`
+    failed on `/scratch` on 2026-09-27 even with `APPTAINER_BINDPATH` unset;
+  - apt's `_apt` sandbox is off: with no `/etc/subuid` entry, `--fakeroot` uses a root-mapped
+    namespace. Nothing else changed: torch is still the unpinned newest cu124 wheel (recorded per
+    run).
+- **Isolation.**
+  - `hpc/env.sh` (installed as `$PR_ROOT/env.sh`) unsets the login profile's
+    `APPTAINER_BINDPATH=/scratch,/projects,/share/apps,/mnt,/state/partition1`. Every `apptainer exec`
+    of ours binds only `$PR_ROOT` and uses `--no-home`, so `$PD_REF` is not even visible inside our
+    containers.
+  - `hpc/isolation_check.py` (run in every job) adds two checks to HANDOFF §4d: `PYTHONPATH` is empty,
+    and the imported `pufferroyale` is the job's checkout, not the image's `/opt/pufferroyale`.
+- **wandb:** the key is copied (read-only) from `~/.netrc` into `$PR_ROOT/secrets/wandb_key` (mode
+  600, directory 700) at the user's request. `env.sh` exports it as `WANDB_API_KEY`, plus
+  `WANDB_ENTITY=<netid>` and `WANDB_PROJECT=pufferroyale`, with every wandb directory under `$PR_ROOT`.
+- **GPU utilisation floor (user's instructions, 2026-10-03).**
+  - **What:** our GPU jobs keep the device at **≥ 75% utilization at all times**, by running
+    `hpc/gpu_heartbeat.py` next to the job.
+  - **Why:** Torch reclaims GPUs whose jobs stay at low utilization; the user's PufferDrive runs a
+    heartbeat for this reason. Pre-v0.5 calibration showed `league_train.py` at 2–13%.
+  - **How it works:** an integral controller on NVML device utilization (setpoint 80%), small
+    2048² matmuls, at most 95% of the time, nice 19. `HEARTBEAT=0` disables it.
+  - **Stacking:** several runs may share one GPU whenever that gives more total training throughput
+    (user: "whatever might lead to faster training overall"). Phase 3 measures 1/2/4 runs per GPU
+    with the heartbeat running. The user also set **one GPU per job**: no multi-GPU jobs.
+- **Accounts and GPU types:** `torch_pr_355_tandon_priority` / `_advanced`, `--gres=gpu:1
+  --constraint=a100|h100|h200`, and no `--partition` (Torch's job-submit filter routes). PufferDrive's
+  compute configs use the same accounts and GPU types. Concurrency: start with ≤ 4 GPUs, more as
+  needed (user).
+- **Reverse if:** Torch publishes a utilization policy that makes the floor unnecessary, or a
+  stacked layout keeps real utilization above it on its own.
+
+### D80 — Two Linux fixes found by the first G0 attempt: `-lm`, and the site's BASH_ENV
+- **`make test-c` did not link on Linux.** `tests/c/test_wp_env.c` (from the work package) calls `pow()`.
+  macOS links libm implicitly; Linux does not (`undefined reference to 'pow'`, CPU G0 job 19136106).
+  **Fix:** the Makefile appends `$(LDLIBS)` (default `-lm`) to every C test/bench link line. It changes
+  build tooling only: no engine code and no test changed. A HANDOFF §5 portability fix; the golden
+  hashes are the proof. **To merge on the Mac side.**
+- **Our isolation was being undone.** Torch's site profile `/share/apps/profile.d/nyu.sh` exports
+  `BASH_ENV=/etc/profile.d/cluster.sh`, so every non-interactive bash re-sources it. That includes
+  the bash launcher behind the `apptainer` command (`/share/apps/apptainer/bin/apptainer`), and it
+  re-exported `APPTAINER_BINDPATH=/scratch,/projects,/share/apps,/mnt,/state/partition1` and
+  `APPTAINER_CACHEDIR`/`SINGULARITY_CACHEDIR=/scratch/$USER/...-cache` after `env.sh` had changed
+  them.
+  - **Effects:** `/scratch` (incl. `$PD_REF`) was visible inside our containers (only reported by the
+    isolation check; nothing was used from it). The first image build (job 19133793) also wrote its
+    Docker layers to the user's general `/scratch/$USER/apptainer-cache` instead of
+    `$PR_ROOT/cache/apptainer`.
+  - **Fix:** `env.sh` unsets `BASH_ENV` (and `ENV`) for our processes only; no dotfile or site file is
+    touched.
+  - **Verified on a compute node:** `PD_REF visible in container: False`, Apptainer no longer receives
+    the site cache or bind variables, and `make test-c` gives 184,647 checks, 0 failures.
+  - It also explains why unsetting `APPTAINER_BINDPATH` "did not work" on 2026-09-27 (D79's `%setup`
+    bind points stay as a harmless safety net).
+
+### D81 — G0 passed with four explained, platform-only deviations (user's decision, 2026-10-04)
+CPU part of G0 on a Xeon Platinum 8592+ node (job 19136476, commit 50999ea):
+- **Passed:** golden hashes (all 6 matches bit-identical to the macOS reference), the isolation
+  check, `make test-c` (184,647 checks, 0 failures), `make asan` (184,431 checks, clean).
+- **pytest:** 1,867 passed, 4 failed. The user decided to treat G0 as passed and to continue. The
+  tests and thresholds are untouched; fixes go to the Mac side.
+  1. `tests/spec/test_v05_policy.py::test_recurrent_train_and_eval_paths[flat-1]` and
+     `[conditional-1]` require bitwise-equal logits between the training forward (autograd on) and
+     a `no_grad` forward of `Recurrent`.
+     - **What differs:** on x86 CPU they differ by at most 5.2e-10 (flat) and 4.8e-7 (conditional).
+     - **Why:** with `torch.backends.mkldnn.enabled = False` (oneDNN off) both are bitwise equal, and
+       two `no_grad` forwards are always bitwise equal with identical masks. So no state persists:
+       the difference is oneDNN choosing different CPU kernels for the two paths.
+     - **Impact on training:** none (it runs on CUDA).
+     - **Suggested fix (tester / SPEC process):** compare with `torch.allclose(atol=1e-5)`, or disable
+       mkldnn in that test.
+  2. `tests/builder/test_wp_trainer.py::test_reward_clip_values` assumes the clip-0, clip −1 and
+     clip-0.002 runs see the same rollouts for 4 epochs, but each run trains between rollouts on
+     differently scaled rewards.
+     - **What differs:** epochs 0–2 matched exactly (clamp exact; c ≤ 0 unchanged). In epoch 3, 4 of
+       64 rewards differ with opposite signs, i.e. different actions were sampled after 3 updates.
+     - **Suggested fix:** check only the rollout before the first `train()`, or use learning rate 0.
+  3. `tests/spec/test_nonfunctional.py::test_e2e_check_prints_pass`: e2e 19/21. One failing check is
+     pytest (item 2); the other is item 4.
+  4. The e2e `perf` stress check: 6,467 ticks/s against the 10,000 threshold set on the M4.
+     - On these CPUs the cold-start stress window runs at 6–9k ticks/s; with a warm-up it runs at
+       18–20k (EXPERIMENTS, pre-v0.5 notes).
+     - **Suggested fix:** a warm-up as in the spec test, or a per-platform threshold.
+- **Non-gating `make asan-py`:** 1,797 passed and 7 failed, with no sanitizer report from our extension.
+  - Three failures are items 1–2 above.
+  - Four are new v0.5 subprocess tests the Makefile's ASan skip list doesn't know yet
+    (`test_wp_audit.py::test_stages_after_a_preemption_and_from_another_cwd`,
+    `test_v05_tools.py::test_stages_relative_paths_are_the_callers`, and `test_plot_history` in
+    `test_wp_tools.py` and `test_v05_tools.py`):
+    - the `stages` children inherit the relative `PUFFERROYALE_BINDING_DIR=build/debug/pufferroyale` in
+      another working directory and cannot import the binding;
+    - the `plot_history` children run matplotlib under the preloaded ASan runtime.
+  - **Suggested fix (Mac side):** add them to `ASAN_PY_SKIP_SUBPROC`.
+- **Reverse if:** the GPU node's run of G0 shows anything else, or the Mac team decides one of
+  these is a real defect.
+
+### D82 — GPU training runs with non-deterministic cuDNN (`--train.torch-deterministic=`)
+- **Finding (H100, 2026-10-04).** The v0.5 league trained at only ~1,160–1,190 learner steps/s
+  (calibration job 19134430, any num_envs and batch), 4–5× below the pre-v0.5 league on the same GPU.
+  - **Where the time went:** a cProfile of a short stage-1-shaped run spent 15.9 of 37.7 s in
+    `torch.conv2d` (~17 ms per call), versus 2.9 s in the C env.
+  - **Micro-benchmark** (default conditional policy, `forward_eval` of 256 rows, H100, heartbeat on):
+    1.6 ms with cuDNN's default algorithms, **73 ms with `cudnn.deterministic=True`**, 2.7 ms with
+    `benchmark=True`, 95 ms with cuDNN off, 202 ms on 16 CPU threads.
+  - **Cause:** `royale.ini [train] torch_deterministic = True`, which PuffeRL turns into
+    `torch.backends.cudnn.deterministic = True`.
+- **Decision:** every GPU training run passes `--train.torch-deterministic=` in `EXTRA_ARGS`, under the
+  user's "whatever might lead to faster training overall" (2026-10-03). This is a run flag only: no
+  code or config file changes. `hpc/calibrate.py` uses it by default (`--deterministic` for the
+  reference mode).
+  - The value must be EMPTY: PufferLib's config parser builds boolean options with `type=bool`, so
+    `False` and `0` are non-empty strings and parse as **True** (checked; it affects every boolean
+    `--train.*` / `--env.*` override, e.g. `--train.anneal-lr`). **For the Mac side:** consider
+    a proper bool parser.
+- **Cost:** GPU training is no longer bit-for-bit reproducible run to run. Training is still seeded,
+  league resumes were already "deterministic, not bit-identical", and every determinism test (CPU)
+  is unaffected. Evaluation tools (`eval.py`, `tournament.py`, `best_response.py`) also run under
+  PuffeRL / torch defaults: the tournament and `eval.py` do not set deterministic cuDNN, while
+  `best_response.py` trains through PuffeRL and needs the same flag.
+- **Reverse if:** exact GPU reproducibility becomes a requirement (then accept ~5× slower runs, or
+  ask the Mac team for a deterministic-but-fast decoder).
+
+### D83 — wandb entity `<netid>-new-york-university`
+- **What failed:** the user asked for wandb "on my <netid> account (not emerge_org)". From a compute
+  node (2026-10-04), `wandb.init(entity="<netid>")` fails with `CommError: entity <netid> not found
+  during upsertBucket`. The bare username entity exists (GraphQL: personal, not a team), but it cannot
+  hold new projects.
+- **What we use:** the account's personal workspace, `<netid>-new-york-university` (a team in the
+  user's own organisation, holding their other personal projects). Online logging works there:
+  `https://wandb.ai/<netid>-new-york-university/pufferroyale` (test run `compute-node-connectivity`,
+  group `setup-checks`). `env.sh` sets `WANDB_ENTITY` to it; the default entity `emerge_` is never
+  used.
+- **Network:** compute nodes reach wandb directly; no TLS workaround is needed (PufferDrive's
+  `WANDB_INSECURE_DISABLE_SSL` is not adopted).
+
+### D84 — Stage-1 sizes: league defaults (batch = num_envs × 64, minibatch 1,024), not a throughput-picked minibatch
+- **Evidence.** The first §6b smoke (job 19150297: 512 envs, batch 65,536, minibatch 8,192) was still at
+  0.25 vs `bot:random` after 1.1M learner steps.
+  - Training was healthy: explained variance 0.17 → 0.57, losses finite.
+  - But `approx_kl` stayed at ~0.0003 and `clipfrac` near 0: few, small updates.
+  - That configuration makes one gradient step per 8,192 learner steps. The Mac CPU learning check
+    (TRAINING_PLAN §7: batch 2,048, minibatch 1,024) made one per 1,024 and passed 0.9 at ~0.4M steps,
+    i.e. after ~390 updates. At equal updates the two curves agree so far (~0.25–0.3 after ~136).
+- **Throughput does not decide it.** Phase 3 shows SPS is set by env stepping: minibatch 4,096 vs
+  16,384 gives the same SPS. So HANDOFF §6's minibatch menu (4,096–16,384) only trades learning per
+  step for nothing.
+- **Decision.** Stage 1 uses `league_train.py`'s documented defaults (DECISIONS D31): batch = num_envs ×
+  bptt_horizon (256 × 64 = 16,384) and minibatch = `royale.ini`'s 1,024. That is TRAINING_PLAN §8.1's "royale.ini
+  hyperparameters" and the Mac check's update density. It also keeps GPU memory small: ~1 GB of
+  activations, so stacking is limited by CPU and GPU time, not memory.
+  - Confirmed by a second smoke with exactly these sizes (job 19150430) before Stage 1 is launched.
+- **Snapshot interval 200 epochs** (3.3M learner steps, ~10 min at 5.4k SPS) for Stage 1:
+  - stage-1 snapshots only make resume possible (their pool mass is 0);
+  - 5.2 MB each, interval 50 would write ~366 per heuristic rung (~34 GB over 18 ladders);
+  - early stopping is then checked every 3.3M steps. `hpc/stage1_report.py` measures steps to
+    G2 from the match outcomes, not the snapshot grid.
+- **Note for the plan.** Batch and minibatch are learning hyperparameters here, not only throughput
+  settings. HANDOFF §6/§8 should say so; the Stage-3 pre-registration must fix them explicitly.
+
+### D85 — Stage 1 stacks 7 ladders per GPU (3 GPUs in total)
+- **Evidence:** stage-1 pack 0 (job 19150509, H100, 4 ladders, league default sizes):
+  - 6.5–7.1k learner SPS per ladder;
+  - 16 GB of the 80 GB used;
+  - the heartbeat busy 47% of the time to hold 80% device utilization, i.e. the 4 ladders' training
+    uses about a third of the GPU's time;
+  - each ladder needs ~1 CPU core.
+- **Decision:** the 14 ladders not yet started go into two 7-ladder jobs (`stage1_packA/B.txt`, 16 CPUs,
+  128 GB host memory), replacing four pending 4-ladder jobs (cancelled while pending).
+  - Expected at 7 ladders: ~60% GPU time, ~28 GB, 7 cores plus the heartbeat (H200 jobs allow 16 CPUs).
+  - Stage 1 then needs 3 GPUs instead of 5 (within the user's starting limit of 4), and the smaller
+    request should start sooner in the congested queue.
+  - Per-ladder SPS may drop somewhat at 7. The comparison is in learner steps, so speed does not
+    bias it.
+- **Reverse if:** the 7-ladder jobs run below ~4k SPS per ladder (then split them).
+
+### D86 — Stage 1 adds a fixed-budget heuristic phase (the plan's decision rule needs it)
+- **The disagreement** (HANDOFF/tools vs TRAINING_PLAN; the plan wins, reported to the user):
+  - `scripts/stages.py` passes `--early-stop-score <threshold>` on every rung, so the heuristic rung ends
+    as soon as the learner scores ≥ 0.55 over 2,000 matches at a snapshot epoch.
+  - TRAINING_PLAN §8.1's decision rule compares configurations by "the heuristic score at 100M / 200M
+    / 300M steps", and the plan budgeted G3 at 100–300M.
+  - On the cluster, `S1main_s1` passed G3 (0.656) at the rung's first gate check, 3.28M steps, so the
+    fixed-budget scores never exist for ladders that pass.
+- **Decision.** The ladders run as specified: their verdicts are G1–G3, plus steps-to-gate at
+  the 3.28M-step check resolution. In addition, every ladder gets a **fixed-budget heuristic run**:
+  - `hpc/league_run.py --run-id <prefix>_H300 --init-from <prefix>_1_random --anchors bot:heuristic
+    --self-play-frac 0 --anchor-frac 1.0 --total-timesteps 300000000`;
+  - the ladder's own config flags, no early stop, wandb group `S1H<config>`;
+  - 18 runs, 6 per GPU (`$DATA_DIR/packs/stage1_H300_pack{H,I,J}.txt`).
+  - Same start for every configuration (its random-rung model), the same 300M budget, and no optimizer
+    reset in the middle. The 100M / 200M / 300M scores (last 2,000 matches before each mark, from
+    `history.jsonl` outcomes) feed the decision rule.
+- **Cost:** 18 × 300M = 5.4B learner steps, ~17 h on 3 GPUs at ~5k SPS per run.
+- **Reverse if:** the user prefers ranking by steps-to-G3 or by the score at a smaller budget (then
+  stop the runs at that budget).
+
+### D87 — GPU heartbeat: double-buffered at nice 0; packs cap threads per line
+- **What went wrong.** Every stacked pack started with the GPU below the 75% floor (D79):
+  - first 5-min window: Stage-1 pack B (19150614) 7.4%, pack H (19152998) 64%, pack I (19152999) 34%;
+  - pack J (19153517, gh002, node load 88 of 96 cores) read 5%, 0.4% and 1.7% for 15 min. Its 6 runs
+    needed 13–16 min to start (about 2 min elsewhere), each burning 2–3 cores of user CPU meanwhile.
+  - Throughout, the heartbeat reported itself busy 56–99% of the time.
+- **Causes (measured, jobs 19154132 / 19155336, H100, 24 busy loops on the job's 16 cores):**
+  - the heartbeat ran at nice 19 and synchronized after every 4 small matmuls (~1.4 ms of GPU work),
+    so each time it lost the CPU the GPU went idle; at nice 19 under full CPU load it never even
+    started within 130 s, in either version;
+  - pack lines ran with no thread limit, so torch and numpy started one thread per CPU in every
+    process (6 lines × 16 threads on 16 CPUs). That oversubscription is the likely cause of the slow
+    starts. It is not proven: the slow phase was over before it could be profiled.
+- **Decision.**
+  - `hpc/gpu_heartbeat.py` queues ~20 ms batches of matmuls (count measured at start) and keeps two
+    batches in flight, waiting on blocking CUDA events (no spinning core).
+  - `hpc/lib.sh` starts it at nice 0 (`HEARTBEAT_NICE`).
+  - Measured under the same CPU load: new heartbeat at nice 0 held 80.0% with 0 of 30 one-second samples
+    below 75% in every window; the old one at nice 0 held 54–73%; the new one at nice 10 held 79–82%,
+    with up to 10 of 30 samples below 75%.
+  - `hpc/pack.sbatch` defaults `PACK_THREADS` (OMP / MKL / OpenBLAS) to the job's CPUs ÷ the lines
+    running at once, at least 1 (6 lines on 16 CPUs → 2).
+- **Scope.** New jobs only. The running packs (B, H, I, J) keep the pinned old heartbeat. After their
+  startup windows, every 5-min window has been 75.7–87.3% (mostly 79.5–80.5%), so they are not
+  restarted.
+- **Reverse if:** a pack's SPS drops with the thread cap (then raise `PACK_THREADS`), or the nice-0
+  heartbeat measurably slows training.
+
+### D88 — The fixed-budget phase stops at 100M, not 300M (user's decision, 2026-10-04)
+- **Deviation** from D86 and TRAINING_PLAN §8.1 ("heuristic score at 100M / 200M / 300M"), as D86's
+  "reverse if" anticipated.
+- **Why** (what the user was shown):
+  - Ceiling: at 75M, 7 of the 9 configurations had a seed-mean score vs `bot:heuristic` within 0.987–0.995.
+  - The uncertainty is about ±0.004 (95%) per run at p ≈ 0.99 over 2,000 matches. The two seeds of
+    one configuration differ by up to 0.014 (grid4 at 50M: 0.971 vs 0.993).
+  - The order reshuffled between marks (noshape joint 1st at 50M, 5th at 75M), so 200M/300M would
+    most likely give a tighter tie, which the plan's rule already breaks toward the simpler option.
+  - Continuing would have cost ~27 GPU-hours and ~8.5 h before stage 1 could be frozen.
+- **Procedure.**
+  - Each run's last snapshot past 100M is `snap_6200.pt` (epoch 6,200 × 16,384 = 101.6M steps).
+    Once all 18 had written it, jobs 19152998 / 19152999 / 19153517 were cancelled by job id.
+  - Scores at 100M:
+    - the training window (last 2,000 matches before 100M, `hpc/stage1_report.py`);
+    - `eval.py` on `snap_6200.pt` vs `bot:heuristic`, 500 matches per seat, sampled
+      (`$DATA_DIR/packs/h300_100M_eval.txt`).
+- **Lost:** the 200M / 300M marks and longer stability evidence against a fixed bot. The latter is a
+  weak proxy for stage 3, which is self-play. The one late decline (lr1e-3_s0, 0.990 at 50M to
+  0.920 at 78M) was already visible.
+
+### D89 — Stage-1 configuration: `main` as the default, `grid2` kept ready (user's decision, 2026-10-04)
+- **Data:** EXPERIMENTS "Stage-1 results". All 18 ladders passed G1–G3. At the fixed budget (100M,
+  D88), every configuration except lr1e-3 and flat scores 0.988–0.997 vs `bot:heuristic` (`eval.py`,
+  1,000 matches per seed): a ceiling tie.
+- **The plan's rule** (TRAINING_PLAN §8.1): best heuristic score at the fixed budget, ties broken
+  toward the simpler option (feed-forward, grid 1). Among the tied feed-forward grid-1
+  configurations (main, noshape, lr1e-4, ent), main learns fastest: 0.90 at 11.5M vs 15.2–19.3M.
+- **Priority (looking at everything: final score, learning speed, stability, seed spread, risk):**
+  1. **main** (recommended freeze).
+     - Tied best at 100M (0.990).
+     - Fastest grid-1 learner, with the smallest seed spread in speed (11.4M / 11.5M).
+     - Stable.
+     - No placement-precision risk.
+  2. **grid2** (best measured performer; the alternative).
+     - Fastest to 0.90 (7.4M) and ≥ main at every mark on both seats; 0.997 at 100M.
+     - Not chosen first: the margin is within the ceiling tie at the budget, and 4M steps is < 1% of
+       a 500M–1B stage-3 budget.
+     - Coarse placement (144 blocks instead of 576 tiles) changes the game that stages 3–4 would
+       solve and measure exploitability in. The heuristic bot cannot show whether that costs skill
+       against strong opponents.
+  3. No gain over main; each learns slower:
+     - noshape (15.2M);
+     - lstm (16.2M, adds recurrence);
+     - lr1e-4 (17.2M);
+     - ent split (19.3M);
+     - grid4 (16.0M, largest seed spread).
+  4. Rejected:
+     - flat: 3× slower (34.1M), lowest healthy final score (0.980);
+     - lr1e-3: unstable; s1 collapsed to 0.45 at 100M.
+- **Frozen settings if approved** (stages 3–4):
+  - conditional head, feed-forward, `placement_grid 1`;
+  - shaping `reward_tower 0.3`, `reward_crown 0.2`, `reward_elixir 0.01` with `--train.reward-clip 0`
+    (stage 3 anneals it to 0 over the first 50%, TRAINING_PLAN §8.3);
+  - `royale.ini` hyperparameters: lr 3e-4, γ 0.999, λ 0.95, clip 0.2, vf_coef 2.0, ent_coef 0.01,
+    bptt 64, 1 update epoch;
+  - `--train.torch-deterministic=` (D82).
+  - Sizes (num_envs, batch, minibatch) are a stage-3 pre-registration item: the SPS research may
+    change them.
+- **Reverse if:** the user prefers grid2's speed (accepting the coarser game), or stage-3
+  throughput forces a budget so small that the 4M-step head start matters.
+- **User's decision (2026-10-04):** "Lets keep main as the default - BUT lets keep everything ready
+  for Grid 2 as well. This is a VERY useful ablation down the line as things scale up. I want to keep
+  both."
+  - Default (stages 3–4): **main**, as frozen above.
+  - **grid2 is a standing ablation, ready to launch at any stage:**
+    - `hpc/stage3_submit.sh` with `GRID=2` prints / submits the same A / B / C runs with
+      `--env.placement-grid 2` (run ids `S3g2_<run>_s<seed>`, wandb groups `S3g2_<run>`);
+    - the evaluation tools already handle it: `eval.py` and `best_response.py` take each checkpoint's
+      grid from its `config.json`, and `tournament.py` lets checkpoints of different grids meet, so
+      main-vs-grid2 head-to-head works.
+  - The stage-1 grid2 runs are kept, never deleted: ladders `S1grid2_s{0,1}_{0_noop,1_random,2_heuristic}`
+    and fixed-budget runs `S1grid2_s{0,1}_H300` (snapshots to 101.6M) under `$DATA_DIR/league/`.
+
+
+### D90 — Throughput package for league training (user-approved 2026-10-04: "I agree with your changes")
+- **Why.**
+  - Stage-3 league shapes were CPU-bound: the C engine stepped every match on one core (74–80% of a
+    step), and B/C paid ~1.4 ms of host time per opponent group (~65 groups per step at 64 snapshots).
+  - Stage-3 baselines at the frozen sizes (H100, 256 envs / batch 16,384 / minibatch 1,024): A 4,745 SPS,
+    ckpt64 1,224 SPS. At 1B steps that is ~2.4 days per A run and ~9.5 days per B/C run.
+  - Findings and measurements: `research/REPORT.md` on branch `sps-research`; EXPERIMENTS "SPS research".
+- **What.** All opt-in; with none of these the default paths are unchanged.
+  - `pufferroyale/fast_league.py` (`FastLeagueVecEnv`, enabled by `--env-threads K`, `--fast-opponents`,
+    `--cuda-graphs`):
+    - threaded engine stepping through a new binding function `vec_step_range` (GIL released; no game
+      code touched);
+    - observations copied to the GPU once per step;
+    - opponents sampled on the GPU;
+    - frozen checkpoints in one vmapped forward;
+    - CUDA graphs for the no-grad forwards.
+  - `LeagueVecEnv.send()` calls two hooks whose base versions are exactly the statements they replaced.
+  - `PR_OPT_FLAGS` (setup.py; `-O3 -march=x86-64-v3` for every job via env.sh).
+  - `OMP_NUM_THREADS=1` default in league.sbatch.
+- **Measured** (research job 19164429, H100). Full package, frozen sizes: A 13,194 SPS (2.8×), ckpt64
+  10,703 (8.7×). At 512 envs / batch 65,536: A 18,888, ckpt64 14,802.
+- **Semantics.**
+  - Bit-identical to the default path:
+    - env stepping, observations, rewards, results and card statistics (checked at grids 1 and 2);
+    - greedy policy-opponent trajectories.
+  - Differences:
+    - GPU sampling uses a different random stream than the CPU generator (same distribution; saved in
+      `rng_state()` for exact resume);
+    - vmapped logits differ by float rounding (max |Δ| 8.4e-5, KL ≤ 2.3e-7, same argmax);
+    - padding "self" rows to a multiple of 32 may change logits at rounding level.
+  - All stage-3 runs use the same code, so the A/B/C comparison is unaffected.
+- **Bugs found before any real run, and fixed.**
+  1. A process-wide CUDA-graph memory pool failed an allocator assert once all its graphs had been freed
+     (hpc/tests on GPU). Fix: one pool per graph cache.
+  2. **The learner's graph wrapper, a plain closure, was copied into MMD's deep-copied reference, so the
+     magnet replayed the learner's graph and the MMD KL was 0** (independent code review). Run C would
+     silently have trained like B. Fixes:
+     - the wrapper is a bound method that replays only for its own policy object;
+     - it is installed after the trainer;
+     - a test deep-copies a graphed policy exactly as `_frozen_copy` does.
+  3. Further review hardening (league_train.py, eval_watch.py, league.sbatch, stage3_submit.sh):
+     - eager fallbacks if a capture or the vmapped forward fails;
+     - `thread_local` graph capture;
+     - an event sync before the C step overwrites the pinned buffer;
+     - `--no-fast-opponents` / `--no-cuda-graphs`;
+     - eval exports newer than the resumed epoch are deleted;
+     - one live job per run directory;
+     - immutable, self-contained stage-3 submissions.
+- **Tests:** `hpc/tests/test_fast_league.py` (CPU + CUDA) and the `fast-tests` step of hpc/verify.sbatch.
+  Results of the final verification: EXPERIMENTS "Stage-3 verification".
+
+### D91 — Evaluation sidecar: wandb "eval" section vs heuristic / random / noop (user's request, 2026-10-04)
+- **What.**
+  - `league_train.py --eval-export-interval N` writes the learner's weights every N epochs to
+    `<run>/eval_ckpt/`. It touches no run state or RNG.
+  - `hpc/eval_watch.py`, started next to the training by league.sbatch (`EVAL_EVERY=N`), evaluates each
+    export with `scripts/eval.py` on the CPU:
+    - one process per bot;
+    - sampled actions, both seats, `EVAL_EPISODES` matches per seat and bot;
+    - the same seed at every point.
+  - It logs `eval/vs_heuristic`, `eval/vs_random`, `eval/vs_noop` (plus `eval_detail/*` intervals and
+    seats) against global_step to a wandb run `<RUN_ID>-eval` in the training run's group, and every
+    point to `<run>/eval_history.jsonl`.
+- **Stage 3.**
+  - Every 100 epochs = 1.64M learner steps, about every 2–3 min of training.
+  - 50 matches per seat and bot, i.e. 100 per bot; the 95% interval is about ±0.1 at 0.5 and ±0.06 at 0.9.
+- **Evaluation only.**
+  - The bots never enter training (TRAINING_PLAN principle 3); these curves are monitoring, not the
+    pre-registered E3.
+  - A point is recorded only after the run has saved past its epoch, so a requeue never records points
+    from a discarded trajectory.
+- **Cost.** 3 CPU processes at nice 5 next to the training, inside the job's 24 CPUs (training uses ~3–4).
+
+### D92 — Stage 3 launched per the pre-registration (user's approval and choices, 2026-10-04)
+- **User:**
+  - "Once everything is done - and verified (and meticuolosuly checked) - I hope you launch the
+    training runs required";
+  - 1B learner steps per run;
+  - 4 GPUs at a time;
+  - main as the default with grid2 kept ready (D89).
+- **What runs.** EXPERIMENTS "Stage-3 pre-registration":
+  - A / B / C × seeds 0–2, plus Clo / Chi (seed 0);
+  - the frozen main settings at the stage-1 sizes;
+  - snapshot interval 477 with 64 kept;
+  - shaping annealed over the first 50%;
+  - the D90 throughput package;
+  - the D91 eval section.
+- **How.**
+  - ONE job array (`hpc/stage3_submit.sh` → `hpc/stage3_array.sbatch` → `hpc/league.sbatch`),
+    `--array=0-10%4`, one H100 per task, 24 CPUs;
+  - 72 h wall time, which selects QOS gpu168: the cluster's 4-GPU per-user allowance for jobs over 48 h.
+    gpu48 fell to 2 GPUs per user that day and is shared with the user's other project.
+- **Verification before launch:** EXPERIMENTS "Stage-3 verification". Every check passes; two bugs were
+  found and fixed before any real run (D90).
+- **Engine freeze:** the launch commit (EXPERIMENTS, Stage-3 runs table); its code equals the verified
+  d388d4f.
+
+### D93 — Stage 4 starts from random init; the stage-3 finals become a periodic Hog-mirror check (user's decision, 2026-10-05)
+- **User:**
+  - raised the concern: "if we do this - the 'weights' will implicitely carry some non-zero bias
+    for/against the cards that it was trained against";
+  - proposed the evaluation: "We can use those policies as an eval against the Stage4 polciies (on
+    the same deck, of course) we trained periodically";
+  - agreed with the order stage 3 → E1 → stage 4 (from scratch, checked against the stage-3
+    specialists) → stage 4o.
+- **Change.** TRAINING_PLAN §8.4 and T15: stage 4 starts from **random initialisation**, not from the
+  best stage-3 policy. A warm-start run remains an **optional comparison arm** at the same budget.
+- **Evidence (S3_C_s0 final model, checked 2026-10-05):**
+  - **Card bias:** the 8 Hog 2.6 card-embedding rows (16-d) have norms 1.1–1.9 (mean 1.46). The
+    other 56 cards' rows never received a gradient: mean norm 4.03, as for an untouched N(0, 1) init
+    (√16 = 4). The card-stat projection was fit on those 8 cards only.
+  - **Strategy bias:** card play rates in S3_A_s0's last logging window: Ice Spirit 0.95, Skeletons
+    0.95, Fireball 0.012, Hog Rider 0.007. The mean episode length was 573 of at most 600 env steps,
+    so at least 89% of games went past regulation (360 steps) into overtime. Action entropy fell
+    from ~1.42 at init to ~0.42–0.54 by the end of training.
+  - **RQ3:** the deck meta-game pilots every deck with the stage-4 policy, so a Hog-practised pilot
+    would favour Hog 2.6.
+  - **Cost of starting from scratch:** stage 1 reached 0.90 vs the heuristic bot in 7.4–11.5M steps,
+    about 1% of the stage-4 budget.
+- **Periodic specialist check (TRAINING_PLAN §8.4 item 3, T18).** The stage-4 policy pilots Hog 2.6
+  against the frozen stage-3 finals in the Hog mirror (fair score 0.5), both seats, every K epochs and
+  on the final model. The stage-3 policies are never stage-4 training opponents. K, the opponent set
+  and the match count are fixed in the stage-4 pre-registration.
+
+### D94 — Stage 4o (deck specialists) added to the plan as a proposal (user's idea, 2026-10-05)
+- **User:** "we fix 1-5 decks for ourselves - and play AGAINST RANDOM decks ? (Not self-play but
+  soemthing) ... This should gie us a best policy FOR a deck against any card ? Less general than
+  final proposed Stage 4 polciy - but something still ?"; "DO not implement anything - this is just
+  an idea"; then "lets add this to the proprosal".
+- **What it is (TRAINING_PLAN §8.4o, T19).**
+  - The learner pilots one fixed deck D; one network per deck is the clean version.
+  - The opponent seat draws from the stage-4 deck mix (real-deck pool + random decks, held-out decks
+    excluded).
+  - The opponent decks are piloted by frozen stage-4 snapshots (PFSP). There is no self-play, and no
+    scripted bots, which are too weak.
+  - In game-theoretic terms, a best response to a population, not a minimax policy.
+- **Order.** It comes after stage 4, which supplies the strong random-deck pilots.
+- **Open, for its own pre-registration:**
+  - which 1–5 decks;
+  - random init vs warm start from the stage-4 generalist;
+  - the budget, after a pilot run.
+- **Nothing implemented.** Plan text only.
+
+### D95 — Card roster: Champions, Evolutions and Heroes deferred to last; card batch 3 proposed (user's decision, 2026-10-05)
+- **User:**
+  - asked: "I know there are a LOT of other cards clash royale has -> is it posible for you to search
+    up and let me know if its possible for us to add more ?";
+  - on Champions, Evolutions and Heroes: "That sucks, yeah leave this out -> we'll do that at last if
+    time permits - but update th eplan with our discussion".
+- **Decided.** Champions, Evolutions and Heroes are deferred to the very end (stage 5, only if time
+  permits). Their needs:
+  - a new "activate ability" action (a policy-head change);
+  - per-match cycle counters;
+  - deck-slot rules;
+  - more card ids than the 128 the observation has;
+  - data the repo lacks: `cards-15.535.json` states "evolutions and hero forms are excluded from
+    `cards`".
+- **Proposed, awaiting approval: card batch 3.**
+  - About 20–25 of the 58 deck-legal cards whose level-1 stats are already in
+    `data/source/cards-15.535.json` but not in the engine: tier 1 plus the simpler spells.
+  - A new engine work package done like batch 2 (SPEC §16), in parallel with stage 4.
+  - Stage 4 starts on the 64 cards and does not wait. A later stage-4 run may use the larger roster.
+- **Facts (checked 2026-10-05):**
+  - **The real game:** about 123 regular cards, plus 8 Champions, 43 Evolutions, 18 Heroes and 4
+    tower troops (deckshop.pro; other sites say 127).
+  - **The repo data:** 144 entries. 64 are in the engine; 22 are event or hidden variants; 58 are
+    deck-legal and missing.
+  - **Capacity:** `CARD_SLOTS = 128`, so 122 cards fit without a layout change.
+  - **Effort tiers** (TRAINING_PLAN §8.6), from comparing source fields with `tools/gen_card_db.py`
+    and the engine's 7 spell types and 5 buffs:
+    - 20 troops/buildings with only standard fields;
+    - 19 with extra behaviour fields;
+    - 11 spells, mostly needing new mechanics;
+    - 8 Champions.
+  - **Card coverage:** with 122 cards a random deck contains a given card about half as often, so
+    stage 4 on the larger roster needs roughly twice the steps for the same games per card.
+- **Constraints.** Engine work: the HPC agent may not change engine code, the spec, tests or the
+  golden reference. The engine freeze holds until stage 3 and E1 are done; new cards start a new
+  engine lineage.
+- **Nothing implemented.** Plan text only (TRAINING_PLAN §8.5, §8.6, T20).
+
+### D96 — E1–E5 start; Clo/Chi get the full E1 probe; stage 4 may later train all three methods (user's decision, 2026-10-07)
+- **User:** "Okay - yeah lets go ahead and sure lets add Clo/Cli as well. Also - in the plan - add the
+  fact that while we WILL do these - I guess for the full card training - I also want to use all the
+  3 methods and NOT only the winner. This is an optional take (subjected to time) - first we'll do the
+  trianing only with the winner - and later add others if time permits. Add this to the trainig plan
+  and now continue with the work as required".
+- **E1–E5 approved and started.** Run per the pre-registration (EXPERIMENTS "Stage-3
+  pre-registration"), on the pinned stage-3 checkout, with at most 4 GPUs at a time.
+- **Declared addition: Clo/Chi in E1.** S3_Clo_s0 and S3_Chi_s0 get the same probe as the 9
+  targets: the calibrated budget, BR seeds 0 and 1, and 1000 matches. They are reported as the
+  exploitability-vs-MMD-strength curve on seed 0, never pooled into method C. E3 and E4 also cover
+  them. E2 is unchanged.
+- **Stage 4 extension (optional, time permitting).** The winner's full-card run comes first. The
+  other two methods may follow with identical settings, repeating the A/B/C comparison at full-card
+  scale (TRAINING_PLAN §8.4, T21; HANDOFF §11).
+- **Also corrected:** HANDOFF §11 still said stage 4 starts `--init-from` the winner's model. It now
+  says random init, per D93.
+
+### D97 — E1 best responses train with the D90 throughput paths (2026-10-07)
+- **Why.** `best_response.py` built its trainer from league_train's defaults, where the D90 paths are
+  off. The measured plain-path BR speed was ~6.2k steps/s on an H100 (smoke job 19346156: 3.01M
+  steps in 489 s), about a third of stage-3 training. That would make the 400M calibration run ~19 h
+  and E1 ~2–5 days on the 4 GPUs.
+- **Change (ae3b6fc).**
+  - `best_response.py` gains `--env-threads`, `--fast-opponents` and `--cuda-graphs`. They are passed
+    to `league_train.build` exactly as league training does, and are off by default.
+  - After training, the learner's CUDA graph is removed (new `fast_league.uninstall_learner_graph`),
+    so the evaluation matches run the same plain forward as before.
+  - No engine code changed: `git diff 4865c0e ae3b6fc` touches only `scripts/best_response.py`,
+    `pufferroyale/fast_league.py` (the new function), `hpc/tests/test_best_response_fast.py` and docs.
+- **Checks (job 19348569, pinned `e1_ae3b6fc`).** `pytest hpc/tests`: 23 passed. These include CPU
+  `--env-threads` bit-identity of the BR's weights and W/D/L, and a CUDA run with all three flags.
+  - **Speed:** 3.01M steps in 166.5 s, ~18.1k steps/s (2.9×).
+  - **Training curve:** similar to the plain smoke, with training score vs the target 0.587 vs 0.577
+    at 3M steps.
+- **What differs from the plain path.** Env stepping is bit-identical. GPU opponent sampling uses a
+  different random stream with the same distribution, and the vmapped target forward matches up to
+  float rounding (D90). These are statistically equivalent BRs, so every E1 probe uses the same flags.
+- **Settings for every probe:** `--init-from-target --train.torch-deterministic= --env.reward-tower 0.3
+  --env.reward-crown 0.2 --env.reward-elixir 0.01 --train.reward-clip 0 --shaping-anneal-frac 0.5
+  --env-threads 16 --fast-opponents --cuda-graphs`, 256 envs (batch 16,384, minibatch 1,024 by
+  default), 1000 matches, on the pinned checkout `e1_ae3b6fc`.
+
+### D98 — E1 probes log to W&B (2026-10-07)
+- **Why.** The user asked to see the E1 probes in W&B. `best_response.py` had no W&B logging, so E1
+  was invisible there; its only trace was a heartbeat line every 5 minutes in the Slurm log.
+- **Change.** `best_response.py` accepts league_train.py's logging flags (`--wandb --wandb-project
+  --wandb-group --tag --no-model-upload`, through `league_train.make_wandb`). Without `--wandb`, wandb is
+  never imported, as before.
+  - **Training:** one record per PPO epoch at step = global step: epoch, sps, `losses/*`,
+    `results/<target>/score` and `games` (the epoch's finished training matches), `train_score_vs_target`
+    and `train_games_vs_target` (the pool's running estimate), and PuffeRL's `environment/*` stats.
+  - **Evaluation (1000 matches):** the run summary holds the running `eval/matches`, `eval/wins`,
+    `eval/draws`, `eval/losses` and `eval/br_score`, updated every 50 matches.
+  - **End:** `final/br_score`, `final/exploitability_proxy`, `final/wins`, `final/draws`, `final/losses`,
+    `final/total_timesteps` and `final/train_score_vs_target`.
+- **Logging is read-only.** It reads the trainer's losses and drains the env's finished-match list,
+  which nothing else in the BR uses. New test `test_br_wandb_offline_same_result`: the same BR with and
+  without `--wandb` (WANDB_MODE=offline) has bit-identical weights and identical W/D/L and training
+  counts, and the offline run holds the training and evaluation keys.
+- **Checks.**
+  - CPU job 19376288 (working tree = 43de9fd before the `final/` key rename): `pytest hpc/tests` 11 passed,
+    13 CUDA-only skipped; the best_response / wandb / CLI-flag spec and builder tests 24 passed; an online
+    CPU smoke synced to W&B (run `E1_smoke_wandbcpu_A_s0`). CPU job 19379568 re-ran `hpc/tests` after the
+    rename: 11 passed.
+  - GPU job 19374641 (H100, same content as 43de9fd): `pytest hpc/tests` 24 passed (CUDA included); spec /
+    builder subset 24 passed; online 3M-step BR smoke with all D90 flags, run `E1_smoke_wandb_A_s0`
+    (group `E1_smoke`): 18.1k steps/s, the same as without logging (D97).
+  - CPU job 19381556 on the pinned checkout `e1_43de9fd`: extension built (`-O3 -march=x86-64-v3`),
+    isolation OK, `pytest hpc/tests` 11 passed, 13 CUDA-only skipped.
+- **Probe settings.** Each probe runs as `E1_<name>_s<seed>` in project `pufferroyale`, group `E1`,
+  tag = the target's method (A, B, C, Clo, Chi, or scratch), with `--no-model-upload`.
+- **Gap.** The three calibration runs (D96; 50M, 150M, 400M) were started before this change and are
+  not in W&B. The calibration run at the chosen budget is also the A_s0 seed-0 probe; its numbers are in
+  EXPERIMENTS.md.
+
+### D99 — Stage 4: method C first, A as the self-play ablation; 10B steps in chained 20 h jobs (user's decision, 2026-10-09)
+- **User** (2026-10-09, after the E1–E4 results): "we decided to move ahead PRIMARILY with C (best overall
+  performance) - and A for ablation testing (difference from pure sefl play)"; "lets NOT change the learning
+  poitn thing (use the same non decay thing). Also - while chaining - use 20 hours per sbatch script - and
+  chain accoridnglt"; "For the specialists -> we are using ONLY the best per method"; 2-GPU jobs dropped;
+  "One C and one A on each" GPU type.
+- **Method choice.** By the pre-registered rule (E1 first, E2 second; TRAINING_PLAN §8.4): E1 showed no
+  difference between methods (mean `br_score` A 0.874, B 0.847, C 0.863; seed spread larger), so E2
+  decides: C has the best score against the other methods' finals (0.569; A 0.550, B 0.381), beats B in 8
+  of 9 seed pairings and was strongest at the 50% checkpoints. C over A at the end is not established (A
+  vs C 0.546). A is kept as the pure self-play baseline; B is dropped (B → C was answered in stage 3). At
+  full-card scale, A vs C tests "population + MMD" against pure self-play together. This replaces D96's
+  "winner first, the other two only if time permits".
+- **Runs.** C and A, seeds 0 and 1, one GPU each: S4_C_s0 and S4_A_s0 on H100/H200, S4_C_s1 and S4_A_s1
+  on A100. 10B learner steps each; the 2B and 5B results are the snapshots nearest those step counts
+  (with a constant learning rate a checkpoint of the 10B run is equivalent to a run that ends there, so
+  separate 2B / 5B runs would add nothing).
+- **Unchanged from stage 3:** constant learning rate 3e-4 (no `--anneal-lr`), sizes (256 envs, batch
+  16,384, minibatch 1,024), `--snapshot-interval 477` with 64 kept (the pool covers the last ~500M steps;
+  same speed as stage 3), shaping 0.3 / 0.2 / 0.01 faded over the first 500M steps (`--shaping-anneal-frac
+  0.05` at 10B = stage 3's N = 1,953,125 env steps), the D90 throughput flags, random init (D93).
+- **Decks (§8.4):** pool = the 7 presets (hog26, giant, bait, golem, lavaloon, miner_poison, pekka_bridge),
+  `random_deck_frac 0.5`, held out = xbow, royal_hogs, `random:50:20261003`, seats draw independently.
+- **Chaining.** Each run is a chain of 20 h jobs (`hpc/stage4_submit.sh`, new): link k+1 depends on link
+  k (`afterany`) and resumes from the last save (every 477 epochs, so a time-limit kill loses at most
+  one snapshot interval); a link that finds the run finished does nothing.
+- **Monitoring (new code, cluster-side).**
+  - `league_train.py --log-interval N` (N = 10; named so
+    that PufferLib's `--wandb` flag is not an argparse abbreviation of it): one W&B call per N epochs, losses and environment/*
+    stats averaged, results summed; history.jsonl keeps every epoch; N = 1 is the old path unchanged.
+  - `hpc/eval_watch.py --decks NAME=DECKSET --ckpt NAME=PATH`: every 6,104 epochs (≈100M steps) the
+    learner plays (a) the heuristic and random bots on the pool decks and on the held-out decks (each deck
+    a mirror, 10 matches per seat and deck), and (b) the stage-3 Hog 2.6 specialists S3_A_s1 and S3_C_s0
+    (best final per method by E2 Elo) in the Hog mirror, 200 matches each, half per seat (the D93
+    specialist check). Logged to the `<run>-eval` W&B run.
+  - `hpc/league.sbatch` passes `EVAL_ARGS` to the sidecar.
+- **Checks.** CPU job 19487536 (working tree before the commit): `pytest hpc/tests` 16 passed (new
+  `hpc/tests/test_stage4.py`: the window's averages and sums; a CPU league run with `--log-interval 3` and
+  WANDB_MODE=offline logs epochs 3, 6 and the last partial window 7, whose results add up to history.jsonl;
+  the sidecar's deck-set and checkpoint evaluations with per-seat scores; the launcher's dry run), 13
+  CUDA-only skipped; `tests/spec/test_hpc_templates.py`, `test_v05_tools.py`, `test_league.py`: 96 passed.
+  A first CPU job (19487146) failed the league test: `--wandb-interval` made PufferLib's `--wandb` an argparse
+  abbreviation (`expected one argument`); renamed to `--log-interval`.
+
+### D100 — Stage 4: a card-probability floor in the learner's card choice (user's decision, 2026-10-09)
+- **User** (2026-10-09, after the pilot's per-card play rates): "There should be something which ensures a
+  base frequency of cards playing when they appear"; on the options: "I like the prbablity floor too";
+  "I am the mac team too - so I give you the permission"; "Make the change". The user's caveat on the
+  stage-3 evidence: "another reason say fireball wasnt played was also becuase we were playing agianst teh
+  same deck -> so we might find a way to NOT use fireball and play agianst the same deck".
+- **Evidence.** Pilot (`S4pilot_*`, 15–28M steps, play rate = plays / decisions with the card in hand,
+  affordable and no lockout): Fireball 0.0001 (C_s1) / 0.0023 (A_s1), Poison 0.0003 / 0.0026, Freeze
+  0.0004 / 0.0023, Arrows 0.0020 / 0.0025, The Log 0.0023 / 0.0028, Lightning 0.0035 / 0.0023, Zap 0.53 /
+  0.0028; the median card 0.54 / 0.51. Stage 3: Fireball ≈ 0.0000 for the first 250–500M steps in all four
+  C/A runs checked although it was in every game, 0.014–0.025 from 500–750M on. A card that is never played
+  also never leaves the hand (SPEC §4.1). The entropy bonus barely moves an option of probability p (its
+  gradient scales with about p·|ln p|: 0.0009 at p = 1e-4 against 0.32 at p = 0.2).
+- **Design** (`pufferroyale/torch.py`, conditional head; the policy code is the Mac team's, changed with the
+  user's permission): `Policy.enable_card_floor(eps)` / `set_card_floor(eps)`; for the k legal hand slots of
+  a row P'(s) = (1 − k·eps)·P(s) + eps and P'(wait) = (1 − k·eps)·P(wait); the position distribution P(j | s)
+  and the mask are unchanged; logits, sampling and PPO's log-probabilities all use P'. eps is a
+  non-persistent buffer (state dicts and checkpoints unchanged; a loaded checkpoint plays without a floor),
+  read on every call so CUDA-graph replays see each new value; enabled before any graph capture. Off (the
+  default), the head runs exactly the statements it ran before.
+- **Training** (`scripts/league_train.py --card-floor EPS --card-floor-steps N`): eps = EPS · max(0, 1 −
+  step / N) for the epoch starting at learner step `step`, set before the rollout on the learner and on the
+  MMD reference (its refreshes are `load_state_dict`, which does not carry the buffer). The "self" opponent
+  is the learner object, so it plays with the floor; snapshots, the eval sidecar and all evaluations use
+  the unfloored policy. history.jsonl / W&B: `card_floor`; W&B: `cards/below_floor` = the number of cards
+  whose play rate is below EPS.
+- **Stage-4 settings** (`hpc/stage4_submit.sh`): EPS = 0.005, N = 5B learner steps (half the run). Stage-3
+  spell rates once alive (0.014–0.025) are above 0.005, so the floor only binds cards the policy has
+  dropped; the 5B and 10B analysis points come from floor-free training (the 2B point trained with eps
+  0.003). Example: a card playable for 100 decisions (50 s) is cast at least once with probability
+  1 − 0.995^100 ≈ 0.39.
+- **Pilot again** before production: the first pilot (no floor) stays as the comparison at equal seeds.
+
+### D101 — Stage 4: Claude Opus 5.5 plays the training policy every 250M steps, recorded to W&B (user's decision, 2026-10-09)
+- **User** (2026-10-09): "every 100M steps -is it possible to launch a separate problem where Cluade Opus 5.5
+  with one of the unseen coherent decks (not random) plays aginst the training policy - this should be ONE
+  separate job per main run - and the logs are added as the main jobs runs once every 100M steps. THe recorded
+  game in the simulator should be logged to Wandb"; "It play sonly 1 game (NO SDK)"; choices: the headless
+  Claude Code CLI inside the job, and for the policy's deck "Lets do both" (mirror and a pool deck). After the
+  usage discussion (the CLI runs on the user's claude.ai Team seat, EMERGE Lab, no API key; the CLI's
+  `total_cost_usd` is an estimate at API prices, not a bill; ~400 games would strain the seat's limits): "let
+  keep games every 250M - and ONLY for C - any one seed ONLY".
+- **Scope.** S4_C_s0 only (H100, the faster seed): one game per 250M learner steps, 40 games over 10B, each
+  against the first saved policy at or after the mark (a snapshot, never deleted; the final model for the last
+  one), sampled actions, without the D100 floor. Evaluation only: nothing reaches the training.
+- **Setup of game k** (i = k − 1; `hpc/llm_game.py game_config`): Claude plays X-Bow or Royal Hogs (the held-out
+  presets, alternating); the policy plays the same deck in games with (i // 2) even, else a pool preset
+  (cycling through all 7 within 40 games); Claude's seat flips every 4 games. One game per mark ("both" deck
+  modes alternate).
+- **Mechanism (no SDK).** A CPU job chain per run (`hpc/llm.sbatch`, 2-day links): `hpc/llm_game.py` (in the
+  image) plays the match through the repo's text harness (`pufferroyale.llm`: RULES_PROMPT, render_state,
+  parse_action; Claude decides every 20 ticks = 1 s and is not asked when it has no legal play), writing each
+  decision to a node-local turn file; `hpc/llm_relay.py` (on the host, where the CLI and its login live)
+  answers with one stateless call `claude -p --model claude-opus-5-5 --effort low --system-prompt-file
+  RULES_PROMPT.txt --tools "" --strict-mcp-config --no-session-persistence --disable-slash-commands
+  --setting-sources "" --output-format json`. Checked by hand (2026-10-09, one call): logged in through
+  claude.ai, no CLAUDE.md / memory / tools in the context, 12.6 s per call. A failed call (e.g. a usage limit)
+  is retried with back-off; after 3 h the game is aborted and retried later (3 attempts).
+- **Records.** Per game `<run>/llm/game_<k>/` (meta, every tick's frame, plays, Claude's decisions with replies
+  and token usage, result, GIF via `hpc/llm_render.py`); W&B run `<run>-llm` (group S4_C) at step = the policy's
+  global step: `llm/score` (Claude's), crowns, decision / error / token counts, the CLI's cost estimate,
+  `llm/replay` (the GIF) and `llm/decision_log` (Claude's replies).
+
+### D102 — Stage 4: four more runs with constant dense rewards and a constant card floor (user's decision, 2026-10-10)
+- **User** (2026-10-10, after S4_C_s0's specialist scores fell from 0.23 / 0.21 at 500M to 0.09 / 0.06 at
+  600M, right after the shaping had faded out): "we will have to launch 4 more runs - everything, literally
+  everything same as right now - but the bonus wearing off has to go - I think we are doing it way too soon,
+  and we shouldnt do this "curriculum learning" at all - lets keep dense rewards. Anything else we are
+  swicthing off like this ?" Answers: card floor "Constant 0.005 forever"; PufferLib's priority beta "Keep
+  PufferLib's default"; Claude games on the new C seed-0 run "Yes, same as S4_C_s0".
+- **Schedules in the S4 runs (checked in the code):** the shaping fade (0.3 / 0.2 / 0.01 to 0 over 500M), the
+  D100 floor fade (0.005 to 0 over 5B), and PuffeRL's prioritized-replay exponent beta = 0.2 + 0.8 · 0.8 ·
+  epoch / total_epochs (0.2 to 0.84 over the run; a library default, also in stage 3, kept). Fixed: lr 3e-4,
+  ent_coef 0.01, MMD 0.05 (C), the deck mix, the opponent fractions, gamma 0.999.
+- **Runs `S4d_*`:** identical to `S4_*` (C and A, seeds 0 and 1, s0 on h100|h200 and s1 on a100, 10B steps, 13
+  links of 20 h, evaluations, W&B every 10th epoch, Claude games on S4d_C_s0 every 250M) except
+  `--shaping-anneal-frac 0` (the shaping weights stay at 0.3 / 0.2 / 0.01 for the whole run; potential-based, so
+  the optimal policy is unchanged) and `--card-floor-steps 0` (the floor stays at 0.005). `hpc/stage4_submit.sh`
+  accepts SHAPING_STEPS=0 for this. S4 vs S4d compares "both schedules" against "no schedules" (the two
+  changes are not separated).
+
+### D103 — Stage 4: the four league + MMD runs (method C) are stopped (user's decision, 2026-10-20)
+- **Why:** all four C runs collapsed (the tile choice became deterministic, then the card set narrowed): S4_C_s0
+  at ~1.65B, S4_C_s1 at ~1.9B, S4d_C_s0 at ~2.2-2.5B, S4d_C_s1 sliding at ~2.7-2.9B; none of the four A runs did.
+  Evidence in EXPERIMENTS "Stage-4 collapse diagnostics".
+- **User** (2026-10-20): "Lets cancel the 4 "C" runs - along with the LLM related and other related runs ONLY
+  for "C". All the "A" runs SHOULD remain the way they are".
+- **Done:** 43 queued / running jobs cancelled by id (the remaining links of S4_C_s0, S4_C_s1, S4d_C_s0,
+  S4d_C_s1 and both Claude chains, S4_C_s0-llm and S4d_C_s0-llm); finished at 13:11. The C-only 2B evaluations
+  had already finished. Run directories, snapshots and logs are kept (the ablations branch from them).
+
+### D104 — Stage 4: collapse ablation `S4x_*` and a placement-entropy term (user's decision, 2026-10-20)
+- **User:** the three ablations "MMD off; snapshots off; a placement-entropy fix", with the control arm and
+  the small code change for the fix ("I like the small code change"), each run isolated from the others.
+- **Design:** four branches of S4_C_s0 at snap_94446 (1.547B steps; healthy, ~0.1B before its onset),
+  `hpc/branch_run.py`: learner, MMD reference and the 64-snapshot pool copied into each run directory (no
+  shared files), step-based schedules continued at the snapshot's step, Adam moments fresh (not saved with
+  snapshots), PFSP stats fresh. One 20 h link each (~0.9-1.1B steps, to ~2.4-2.6B). Arms:
+  `S4x_ctrl_s0` (unchanged), `S4x_nommd_s0` (mmd_coef 0), `S4x_selfonly_s0` (self_play_frac 1.0, MMD on),
+  `S4x_posent_s0` (ent_coef_pos_unweighted 0.01, league + MMD).
+- **Code (8401f59):** `pufferroyale/trainer.py` placement_entropy_unweighted + config key
+  ent_coef_pos_unweighted (royale.ini, default 0 = off; logged as losses/entropy_pos_unweighted for every
+  run, without grad at 0, so other runs train exactly as before); tests in `hpc/tests/test_placement_entropy.py`.
+- **W&B layout (8401f59, user's request):** league runs log their matches in `league/` (score vs self, vs all
+  snapshots, by snapshot age 0-16M / 16-64M / 64-200M / 200M+, pool p median / min / max, pool counters) and
+  `league_snapshots/` (per played snapshot) instead of `environment/league/*` and `results/<spec>/*`;
+  best_response.py unchanged. Applied to the A runs' pinned checkouts (s4_d70c336 -> 2be616d, s4d_f7445af ->
+  b54b511; league_train.py only, no A job was running) so their next links log it.
+- **Pre-existing test failure (not caused by this change):** tests/builder/test_wp_trainer.py::
+  test_reward_clip_values also fails on s4d_f7445af (the code of every stage-4 run since launch).
