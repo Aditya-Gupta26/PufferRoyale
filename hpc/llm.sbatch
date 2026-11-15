@@ -9,7 +9,9 @@
 #
 # ENV_FILE (hpc/stage4_submit.sh writes it): PR_CHECKOUT, RUN_ID, LLM_EVERY, LLM_MODEL, LLM_EFFORT, LLM_GROUP
 # (W&B group; empty = no W&B), PR_OPT_FLAGS (must equal the training's: the C extension of the shared checkout
-# is never rebuilt under a running trainer), optional LLM_ARGS (more hpc/llm_game.py options). Chained like the training: a
+# is never rebuilt under a running trainer), optional LLM_ARGS (more hpc/llm_game.py options), optional LLM_RUN_DIR
+# (play a fixed model instead of a league run: a folder with the run's config.json and a link to the checkpoint;
+# default $DATA_DIR/league/$RUN_ID). Chained like the training: a
 # link resumes from <run>/llm/state.json; a link that finds <run>/llm/DONE exits at once.
 #SBATCH --job-name=pr-llm
 #SBATCH --account=torch_pr_355_tandon_priority
@@ -35,7 +37,7 @@ LLM_EFFORT="${LLM_EFFORT:-low}"
 LLM_GROUP="${LLM_GROUP:-}"
 read -r -a LX <<< "${LLM_ARGS:-}"
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-RUN_DIR="$DATA_DIR/league/$RUN_ID"
+RUN_DIR="${LLM_RUN_DIR:-$DATA_DIR/league/$RUN_ID}"
 echo "job ${SLURM_JOB_ID:-local} on $(hostname): run=$RUN_DIR every=$LLM_EVERY model=$LLM_MODEL effort=$LLM_EFFORT" \
      "repo=$PROJECT @ $(git -C "$PROJECT" rev-parse --short HEAD 2>/dev/null)"
 if [ -f "$RUN_DIR/llm/DONE" ]; then echo "$RUN_DIR/llm/DONE exists: every game is played"; exit 0; fi

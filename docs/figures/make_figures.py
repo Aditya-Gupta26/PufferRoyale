@@ -27,6 +27,7 @@ Figures (data sources in docs/figures/FIGURES.md):
     floor_ablation.png       stage-4a card-floor arms, evaluation over their +1.0B steps
     stage5_round_robin.png   stage-5 round robin of the 4 stage-4a arms: payoff matrix and Elo
     human_play.png           ranked human matches against the policy (aggregates only, no player data)
+    claude_games.png         Claude models against the policy (also writes claude_games.json, the per-game table)
 """
 import argparse
 import glob
@@ -86,28 +87,17 @@ plt.rcParams.update({
 
 
 def frame(h_plot, title, subtitle, foot=None, w=W):
-    """A white figure with a left-aligned title (the takeaway), a subtitle (what is measured) and an optional
-    footnote. Returns (fig, top, bottom): the figure fractions left for the plot area."""
-    tl = textwrap.wrap(title, 62)
-    sl = textwrap.wrap(subtitle, 92) if subtitle else []
-    fl = textwrap.wrap(foot, 96) if foot else []
-    head = 0.16 + 0.29 * len(tl) + (0.08 + 0.215 * len(sl) if sl else 0) + 0.12
-    tail = (0.10 + 0.215 * len(fl)) if fl else 0.0
+    """A white figure that holds only the plot. The figure's context (its takeaway, what is measured, caveats) is
+    NOT drawn into the image: it lives in the README text around the figure (user, 2026-11-14: "The context for
+    figures is in the text - not in the figures itself"). The title, subtitle and footnote are still computed from
+    the data and printed, so the README caption can be checked against them. Returns (fig, top, bottom): the
+    figure fractions left for the plot area."""
+    for tag, txt in (("takeaway", title), ("measured", subtitle), ("note", foot)):
+        if txt:
+            print(f"  {tag}: {txt}")
+    head, tail = 0.16, 0.04
     H = head + h_plot + tail
     fig = plt.figure(figsize=(w, H), dpi=DPI)
-    x0, y = 0.14 / w, H - 0.16
-    for line in tl:
-        y -= 0.29
-        fig.text(x0, y / H, line, fontsize=14.5, fontweight="bold", color=INK, va="baseline")
-    if sl:
-        y -= 0.08
-    for line in sl:
-        y -= 0.215
-        fig.text(x0, y / H, line, fontsize=11, color=INK2, va="baseline")
-    y = tail - 0.10
-    for line in fl:
-        fig.text(x0, (y - 0.17) / H, line, fontsize=11, color=MUTED, va="baseline")
-        y -= 0.215
     return fig, (H - head) / H, tail / H
 
 
@@ -220,25 +210,26 @@ def fig_training_curve(runs, out, chk):
     rows = load_jsonl(f"{runs}/league/{run}/eval_history.jsonl")
     x = np.array([r["global_step"] for r in rows]) / 1e9
     res = [r["results"] for r in rows]
-    series = [  # key, legend, colour
-        ("heuristic_pool", "scripted bot, pool decks (140 matches)", SKY),
-        ("heuristic_heldout", "scripted bot, held-out decks (1,040)", BLUE),
-        ("S3_A_s1", "Hog specialist S3_A_s1 (200)", VERM),
-        ("S3_C_s0", "Hog specialist S3_C_s0 (200)", GREEN),
+    series = [  # key, direct label, colour
+        ("heuristic_pool", "bot, training decks", SKY),
+        ("heuristic_heldout", "bot, held-out decks", BLUE),
+        ("S3_A_s1", "Hog specialist 1", VERM),
+        ("S3_C_s0", "Hog specialist 2", GREEN),
     ]
     rnd = min(min(r["random_pool"]["score"], r["random_heldout"]["score"]) for r in res)
     hh = [r["heuristic_heldout"] for r in res]
     first, last = hh[0], hh[-1]
     fig, top, bottom = frame(
         4.3,
-        f"Against the scripted bot, the policy's score rises from {first['score']:.2f} to {last['score']:.2f} "
-        "over 10B training steps",
-        "S4_A_s1 (the selected policy; pure self-play PPO) evaluated every 0.1B steps. Score = (wins + ½ draws) "
-        "/ matches. Against stage-3 specialists trained only on the Hog deck, played in the Hog mirror, it "
-        "stays far below even.",
-        foot=f"Dots: each evaluation. Lines: centred mean of 5 evaluations (0.5B steps). The random bot scored "
-             f"≥ {math.floor(rnd * 1000) / 1000:.3f} at every evaluation (not drawn).")
-    ax = fig.add_axes([0.085, bottom + 0.62 / fig.get_figheight(), 0.80,
+        f"The agent's score against the scripted bot climbs from {first['score']:.2f} to {last['score']:.2f} "
+        "during training",
+        "Every 0.1B steps the agent played the scripted bot on its 7 training decks and on 52 decks it never "
+        "trained with (held-out). The two low lines are agents trained only on the Hog deck, met in a Hog "
+        "mirror: on their own deck they still beat it easily.",
+        foot=f"Score = (wins + ½ draws) / matches. Dots are single evaluations; lines average 5 neighbouring "
+             f"evaluations. Against the random bot the agent scored at least {math.floor(rnd * 1000) / 1000:.3f} "
+             f"every time (not drawn).")
+    ax = fig.add_axes([0.085, bottom + 0.62 / fig.get_figheight(), 0.645,
                        top - bottom - 0.70 / fig.get_figheight()])
     ax.grid(axis="y")
     ends = []
@@ -247,31 +238,26 @@ def fig_training_curve(runs, out, chk):
         ys = rolling_mean(y, 5)
         ax.scatter(x, y, s=10, color=col, alpha=0.35, linewidths=0, zorder=2)
         ax.plot(x, ys, color=col, lw=2.2, zorder=3, label=lab)
-        ends.append((ys[-1], col, f"{ys[-1]:.2f}"))
-    # label the smoothed end values
-    ly = repel([e[0] for e in ends], 0.045)
+        ends.append((ys[-1], col, f"{ys[-1]:.2f}  {lab}"))
+    # label every line at its smoothed end value (no legend)
+    ly = repel([e[0] for e in ends], 0.055)
     for (yv, col, txt), yl in zip(ends, ly):
         ax.text(x[-1] + 0.17, yl, txt, color=INK, fontsize=11, va="center", ha="left")
         ax.plot([x[-1] + 0.03, x[-1] + 0.14], [yv, yl], color=MUTED, lw=0.8, clip_on=False)
-    # call out the held-out start and end evaluations (raw, with their 95% intervals)
-    ax.annotate(f"{first['score']:.2f} at {x[0]:.1f}B [{first['lo']:.2f}, {first['hi']:.2f}]",
-                xy=(x[0], first["score"]), xytext=(0.55, 0.745), fontsize=11, color=INK, ha="left",
-                va="center", arrowprops=dict(arrowstyle="-", color=MUTED, lw=1, shrinkA=0, shrinkB=3))
-    ax.annotate(f"{last['score']:.3f} at {x[-1]:.1f}B\n[{last['lo']:.3f}, {last['hi']:.3f}]",
-                xy=(x[-1], last["score"]), xytext=(8.05, 0.72), fontsize=11, color=INK, ha="left",
-                va="center", arrowprops=dict(arrowstyle="-", color=MUTED, lw=1, shrinkA=0, shrinkB=3))
+    # call out the first held-out evaluation (raw)
+    ax.annotate(f"{first['score']:.2f} at the first check", xy=(x[0], first["score"]), xytext=(0.6, 0.70),
+                fontsize=11, color=INK2, ha="left", va="center",
+                arrowprops=dict(arrowstyle="-", color=MUTED, lw=1, shrinkA=0, shrinkB=3))
     # the checkpoint that entered the selection (league/S4_A_s1/snap_476523.pt, 7,807,352,832 steps)
     sel = 7.807352832
     ax.axvline(sel, color=AXIS, lw=1, zorder=1)
-    ax.text(sel - 0.1, 0.33, "checkpoint used in\nthe selection: 7.81B", fontsize=11, color=INK2, ha="right",
-            va="center")
+    ax.text(sel - 0.12, 0.45, "selection\ncheckpoint\n(7.81B)", fontsize=11, color=INK2, ha="right", va="center")
     ax.set_xlim(0, 10)
     ax.set_ylim(0, 1)
     ax.set_xticks(range(0, 11))
     ax.set_yticks(np.arange(0, 1.01, 0.2))
     ax.set_xlabel("training steps (billions)")
-    ax.set_ylabel("score vs opponent")
-    ax.legend(loc="upper left", bbox_to_anchor=(0.0, 0.70), handlelength=1.6, borderaxespad=0.2)
+    ax.set_ylabel("the agent's score")
     save(fig, out, "training_curve.png")
     s3a, s3c = [r["S3_A_s1"] for r in res], [r["S3_C_s0"] for r in res]
     print(f"  {run}: {len(rows)} evaluations {x[0]:.3f}B-{x[-1]:.3f}B; held-out first {first['score']:.4f} "
@@ -349,20 +335,19 @@ def fig_selection_br(runs, out, chk):
     n_rows = len(order)
     fig, top, bottom = frame(
         0.42 * n_rows + 1.25,
-        f"{WORDS.get(len(tied), str(len(tied)))} candidates showed no clear exploit; {SHORT.get(winner, winner)} "
-        "won the tie on "
-        "round-robin Elo",
-        "Exploitability test: a best response (BR) is trained against each frozen candidate, then plays it "
-        "1,000 matches on random decks. BR score 0.5 = no edge; above 0.5 = an exploit (lower is better). "
-        "Selection score = mean of 2 seeds, each counted as at least 0.5.",
-        foot="Bars: 95% Wilson intervals. A copy-start BR begins as an exact copy of its target, so it starts at "
-             "0.5; a score below 0.5 means it found no exploit and drifted.")
+        f"Attackers found no clear weakness in {WORDS.get(len(tied), str(len(tied))).lower()} candidates, and "
+        f"{SHORT.get(winner, winner)} won the tie on Elo",
+        "For each candidate we trained a fresh attacker (a best response) against a frozen copy of it, then "
+        "played them 1,000 times on random decks. An attacker score above 0.5 means it found a weakness, so "
+        "lower is better. A candidate's score is the mean of its 2 attackers, each counted as at least 0.5.",
+        foot="Bars are 95% intervals. An attacker that starts as a copy of its target begins at 0.5, so a score "
+             "below 0.5 means it found nothing and drifted.")
     H = fig.get_figheight()
     ax = fig.add_axes([0.205, bottom + 0.58 / H, 0.47, top - bottom - 1.05 / H])
     ax.axvspan(0, 0.5, color=SHADE, zorder=0, lw=0)
     ax.axvline(0.5, color=AXIS, lw=1.2, zorder=1)
-    ax.text(0.25, -0.75, "no exploit found", ha="center", va="center", fontsize=11, color=INK2)
-    ax.text(0.75, -0.75, "exploited", ha="center", va="center", fontsize=11, color=INK2)
+    ax.text(0.25, -0.75, "no weakness found", ha="center", va="center", fontsize=11, color=INK2)
+    ax.text(0.75, -0.75, "weakness found", ha="center", va="center", fontsize=11, color=INK2)
     # winner row band
     yw = ypos[winner]
     ax.add_patch(Rectangle((0, yw - 0.45), 1, 0.9, color="#e3eef7", zorder=0, lw=0))
@@ -387,7 +372,7 @@ def fig_selection_br(runs, out, chk):
     ax.tick_params(axis="y", length=0)
     ax.set_xticks(np.arange(0, 1.01, 0.1))
     ax.set_xticklabels([f"{v:.1f}" for v in np.arange(0, 1.01, 0.1)])
-    ax.set_xlabel("BR score vs the frozen candidate (higher = more exploitable)")
+    ax.set_xlabel("attacker's score against the candidate")
     ax.spines["left"].set_visible(False)
     ax.axhline(len(elig) - 0.2, color=GRID, lw=1)
     # right-hand table: selection score and Elo
@@ -406,12 +391,11 @@ def fig_selection_br(runs, out, chk):
     # bracket for the tie group
     y0, y1 = ypos[tied[0]] - 0.3, ypos[tied[-1]] + 0.3
     ax.plot([1.39, 1.42, 1.42, 1.39], [y0, y0, y1, y1], color=INK2, lw=1, transform=tr, clip_on=False)
-    ax.text(1.45, (y0 + y1) / 2, f"tied\n(score\n≤ {best + 0.05:.2f}):\nhighest\nElo wins", ha="left",
-            va="center", fontsize=11, color=INK2, transform=tr)
+    ax.text(1.45, (y0 + y1) / 2, "tied", ha="left", va="center", fontsize=11, color=INK2, transform=tr)
     handles = [Line2D([], [], color=BLUE, marker="o", ms=6.5, lw=1.6, mec="white"),
                Line2D([], [], color=VERM, marker="s", ms=6.5, lw=1.6, mec="white")]
-    ax.legend(handles, ["copy-start BR, 150M steps", "from-scratch BR, 1B steps"],
-              loc="lower left", bbox_to_anchor=(-0.02, 1.01), ncol=2, handlelength=1.8, columnspacing=1.2,
+    ax.legend(handles, ["attacker started as a copy (150M steps)", "attacker from scratch (1B steps)"],
+              loc="lower left", bbox_to_anchor=(-0.40, 1.01), ncol=2, handlelength=1.8, columnspacing=1.2,
               borderaxespad=0)
     save(fig, out, "selection_br.png")
     for a in order:
@@ -440,8 +424,7 @@ def _rr_heatmap(rr, names, order, title, subtitle, foot, out, fname, highlight=N
     for i in range(n):
         for j in range(n):
             if i == j:
-                ax.text(j, i, "–", ha="center", va="center", color=MUTED, fontsize=11)
-                continue
+                continue  # a model never plays itself: the cell stays blank
             v = P[i, j]
             r, g, b = to_rgb(DIVERGING(v))
             txt = "white" if 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.45 else INK
@@ -449,7 +432,7 @@ def _rr_heatmap(rr, names, order, title, subtitle, foot, out, fname, highlight=N
                 lo, hi = wilson(v * G[i, j], G[i, j])
                 ax.text(j, i - 0.13, f"{v:.3f}", ha="center", va="center", color=txt, fontsize=12.5,
                         fontweight="bold")
-                ax.text(j, i + 0.22, f"{lo:.3f}–{hi:.3f}", ha="center", va="center", color=txt, fontsize=11)
+                ax.text(j, i + 0.22, f"[{lo:.3f}, {hi:.3f}]", ha="center", va="center", color=txt, fontsize=10.5)
             else:
                 ax.text(j, i, f"{v:.3f}" if ci else f"{v:.2f}", ha="center", va="center", color=txt,
                         fontsize=12.5 if ci else 11, fontweight="bold" if ci else "normal")
@@ -465,8 +448,8 @@ def _rr_heatmap(rr, names, order, title, subtitle, foot, out, fname, highlight=N
     ax.set_yticks(np.arange(-0.5, n), minor=True)
     ax.grid(which="minor", color="white", lw=2)
     ax.tick_params(which="minor", length=0)
-    ax.set_xlabel("column model (opponent)")
-    ax.set_ylabel("row model", labelpad=6)
+    ax.set_xlabel("opponent (column)")
+    ax.set_ylabel("model (row)", labelpad=6)
     if highlight:
         k = order.index(highlight)
         for t in (ax.get_xticklabels()[k], ax.get_yticklabels()[k]):
@@ -533,13 +516,14 @@ def fig_stage1_rr(runs, out, chk):
     unbeaten = [a for a in order if all(rr["P"][rr["agents"].index(a)][rr["agents"].index(b)] > 0.5
                                         for b in order if b != a)]
     assert not unbeaten, f"{unbeaten} beats every other candidate: the title below would be wrong"
-    fig_title = (f"No candidate beats all the others: even the top-rated {names[order[0]]} scores only "
+    fig_title = (f"No candidate beats all the others; even the top-rated {names[order[0]]} scores only "
                  f"{worst_score:.2f} against {names[worst]}")
-    sub = (f"Stage-1 round robin of the 9 selection candidates (checkpoints of 1.55B-7.81B steps). Cell = row "
-           f"model's score vs the column model over the 9 preset deck mirrors, {max(games):,} matches per pair "
-           f"(95% interval about ±0.023). Rows by Elo.")
+    sub = (f"Each of the 9 candidates (checkpoints from 1.55B to 7.81B steps) played every other one "
+           f"{max(games):,} times, in mirrors of the 9 preset decks. A cell is the row model's score against the "
+           f"column model (95% interval about ±0.023). Rows are sorted by Elo.")
     nash = ", ".join(f"{names[a]} {rr['nash'][a]:.2f}" for a in order if rr["nash"][a] > 0.005)
-    foot = f"Nash mixture of the round robin: {nash}. Elo only broke the tie in the selection (stage 3)."
+    foot = (f"The hardest mix of these models to beat (the Nash mixture) is {nash}. In the selection, Elo was "
+            f"only used to break a tie.")
     _rr_heatmap(rr, names, order, fig_title, sub, foot, out, "stage1_round_robin.png", highlight="S4_A_s1",
                 cell=0.52, label_w=1.25)
     i = {a: rr["agents"].index(a) for a in top3}
@@ -579,15 +563,21 @@ def fig_stage5_rr(runs, out, chk):
             chk.cmp(f"stage 5 Nash {row[0]}", rr["nash"][a], row[6])
     colors = {a: ARM_COLOR[arm[a]] for a in rr["agents"]}
     ctrl = order[0]
-    fig_title = "Head to head, the control without a card floor beats every floor arm"
-    sub = (f"Stage-5 round robin of the four stage-4a arms (S4_A_s1 branched at 10.0B, +1.0B steps each, "
-           f"final checkpoints at {min(steps) / 1e9:.1f}B). Cell = row arm's score vs the column arm, "
-           f"{max(games):,} matches per pair over 9 deck mirrors; 95% Wilson interval shown once per pair.")
-    br5 = sorted(glob.glob(f"{runs}/eval/br_S5a_*.json"))
-    foot = ("The deciding test between the arms is their best-response exploitability (stage 5); this round "
-            "robin is only its tie-break. " +
-            (f"Stage-5 BR results present: {len(br5)} of 8 files." if br5 else
-             f"No stage-5 BR result existed when this figure was made ({datetime.now():%Y-%m-%d})."))
+    fig_title = "Head to head, the copy trained without a card floor beats every floored copy"
+    sub = (f"The four copies of the agent at {min(steps) / 1e9:.1f}B steps (the control and floors 0.05, 0.10 and "
+           f"0.20) played each other {max(games):,} times per pair in 9 deck mirrors. A cell is the row model's "
+           f"score against the column model, with its 95% interval shown once per pair.")
+    br5 = {}
+    for f in sorted(glob.glob(f"{runs}/eval/br_S5a_S4L_A_s1_*_s[01].json")):
+        br5.setdefault(re.search(r"_(ctrl|f05|f10|f20)_s[01]\.json$", f).group(1), []).append(load_json(f)["br_score"])
+    if len(br5) == 4 and all(len(v) == 2 for v in br5.values()):
+        m5 = {k: float(np.mean(v)) for k, v in br5.items()}
+        assert min(m5, key=m5.get) == "ctrl", m5
+        foot = (f"The deciding test, exploitability, agreed: 2 trained attackers per copy scored "
+                f"{m5['ctrl']:.2f} on average against the control and {m5['f05']:.2f}, {m5['f10']:.2f} and "
+                f"{m5['f20']:.2f} against floors 0.05, 0.10 and 0.20 (lower is harder to exploit).")
+    else:
+        foot = "The deciding test between the copies is their exploitability; this round robin only breaks ties."
     _rr_heatmap(rr, names, order, fig_title, sub, foot, out, "stage5_round_robin.png", highlight=ctrl,
                 colors=colors, ci=True, cell=1.15, label_w=1.3)
     ia = {arm[a]: rr["agents"].index(a) for a in rr["agents"]}
@@ -648,33 +638,34 @@ def fig_floor_ablation(runs, out, chk):
     pool_disjoint = [a for a in arms[1:] for f, c in zip(data[a], data["ctrl"])
                      if f["results"]["heuristic_pool"]["hi"] < c["results"]["heuristic_pool"]["lo"]
                      or f["results"]["heuristic_pool"]["lo"] > c["results"]["heuristic_pool"]["hi"]]
-    pool_txt = ("On the 140-match pool decks every arm's interval overlaps the control's at every evaluation."
+    pool_txt = ("On the training decks (140 matches) every interval overlaps the control's at every check."
                 if not pool_disjoint else
-                f"On the 140-match pool decks {sorted(set(pool_disjoint))} separate from the control at least once.")
+                f"On the training decks {sorted(set(pool_disjoint))} separate from the control at least once.")
     fl = [ARM_LABEL[a].split()[-1] for a in sep]
 
     def floors(arms_):  # ["f10", "f20"] -> "floors 0.10 and 0.20"
         v = [ARM_LABEL[a].split()[-1] for a in arms_]
         return "" if not v else f"floor {v[0]}" if len(v) == 1 else f"floors {', '.join(v[:-1])} and {v[-1]}"
     what = ("Card floors of " + " and ".join(fl)) if len(fl) > 1 else (f"A card floor of {fl[0]}" if fl else "")
-    title = (f"{what} cost strength against the scripted bot on held-out decks" if fl
+    title = (f"{what} made the agent weaker against the scripted bot on held-out decks" if fl
              else "No card floor separates from the control against the scripted bot")
     fig, top, bottom = frame(
         4.1,
         title,
-        "Stage 4a: S4_A_s1 branched at 10.0B and trained +1.0B more steps per arm, with no floor (control) or "
-        "a constant minimum probability of 0.05, 0.10 or 0.20 on every legal card. Evaluated every 0.1B "
-        "steps, played without the floor. Bands: 95% Wilson intervals.",
-        foot=f"At 10.7-10.9B the held-out intervals of {floors(sep) or 'no floor arm'} lie below the control's"
-             + (f"; {floors(near)} {'overlaps' if len(near) == 1 else 'overlap'} it at least once" if near else "")
-             + f". {pool_txt} At 10.0B the arms are 0.8M steps past the branch point (spread = evaluation "
-             "noise); the arms end at 11.0B.")
+        "We copied the agent at 10.0B steps and trained four copies for 1.0B more steps: one as before (the "
+        "control) and three with a card floor, where every legal card keeps at least a 5%, 10% or 20% chance "
+        "of being picked. Scores are against the scripted bot, played without the floor; bands are 95% "
+        "intervals.",
+        foot=f"Over the last three checks the held-out intervals of {floors(sep) or 'no floor'} sit below the "
+             f"control's" + (f"; {floors(near)} {'overlaps' if len(near) == 1 else 'overlap'} it at least once"
+                              if near else "")
+             + f". {pool_txt}")
     H = fig.get_figheight()
     y0, h = bottom + 0.62 / H, top - bottom - 1.02 / H
     axL = fig.add_axes([0.085, y0, 0.445, h])
     axR = fig.add_axes([0.765, y0, 0.21, h], sharey=axL)
     panels = [(axL, "heuristic_heldout", "held-out decks (1,040 matches per point)"),
-              (axR, "heuristic_pool", "pool decks (140)")]
+              (axR, "heuristic_pool", "training decks (140)")]
     for ax, key, ttl in panels:
         ax.grid(axis="y")
         ends = []
@@ -702,7 +693,7 @@ def fig_floor_ablation(runs, out, chk):
                 ax.plot([xe + 0.01, xe + 0.04], [yv, yl], color=MUTED, lw=0.8, clip_on=False)
     axL.set_ylim(0.78, 1.0)
     axL.set_yticks(np.arange(0.80, 1.001, 0.05))
-    axL.set_ylabel("score vs scripted bot")
+    axL.set_ylabel("score against the scripted bot")
     plt.setp(axR.get_yticklabels(), visible=False)
     axL.legend(loc="lower left", ncol=2, handlelength=2.2, columnspacing=1.0, borderaxespad=0.3)
     save(fig, out, "floor_ablation.png")
@@ -756,12 +747,12 @@ def fig_human_play(runs, out, chk):
 
     fig, top, bottom = frame(
         3.6,
-        f"Humans won {wins} of {n} ranked matches against the policy",
-        f"Browser play against S4_A_s1's final model (10.0B steps, sampled actions), {span}: {n} ranked "
-        f"matches (finished, real-time speed, no assistance) by {players} players. The policy won {losses}, "
-        f"{king} of them by destroying the King Tower (3 crowns).",
-        foot=f"Not counted: {unranked} unranked matches ({abandoned} abandoned, {advisor} with the advisor on"
-             + (f", {rest} other" if rest else "") + f"). The interval treats matches as independent, though "
+        f"Humans won {wins} of {n} ranked matches against the agent",
+        f"People played the final agent in the browser, {span}: {n} ranked matches (finished, at real-time "
+        f"speed, with no hints) by {players} players. The agent won {losses}, {king} of them by destroying the "
+        f"King Tower.",
+        foot=f"Not counted: {unranked} unranked matches ({abandoned} abandoned, {advisor} with hints on"
+             + (f", {rest} other" if rest else "") + f"). The interval treats matches as independent, although "
              f"the {min(2, players)} most active players played {top2} of the {n}.")
     H = fig.get_figheight()
     y0, h = bottom + 0.55 / H, top - bottom - 0.98 / H
@@ -778,7 +769,7 @@ def fig_human_play(runs, out, chk):
     a1.set_xticks([0])
     a1.set_xticklabels(["all\nranked"])
     a1.tick_params(axis="x", length=0)
-    a1.set_ylabel("human score (wins + ½ draws)")
+    a1.set_ylabel("human score")
     a1.set_title("score, 95% CI", loc="left", fontsize=12, color=INK, pad=6)
     # right: crown difference per ranked match, in time order
     a2 = fig.add_axes([0.355, y0, 0.625, h])
@@ -797,16 +788,16 @@ def fig_human_play(runs, out, chk):
     for g, (dd, i0, i1) in enumerate(groups):
         if g:
             a2.axvline(i0 - 0.5, color=AXIS, lw=0.8, zorder=1)
-        a2.text((i0 + i1) / 2, 3.35, f"{dd.day} {dd:%b}", ha="center", va="bottom", fontsize=11, color=INK2)
+        a2.text((i0 + i1) / 2, 3.35, f"{dd:%b} {dd.day}", ha="center", va="bottom", fontsize=10, color=INK2)
     a2.set_xlim(0.3, n + 0.7)
     a2.set_ylim(-3.4, 3.9)
     a2.set_yticks(range(-3, 4))
     a2.set_xticks([1] + list(range(5, n + 1, 5)))
     a2.set_xlabel("ranked match, in the order played")
-    a2.set_ylabel("crowns: human − policy")
+    a2.set_ylabel("crowns: human minus agent")
     a2.set_title("each ranked match", loc="left", fontsize=12, color=INK, pad=6)
     handles = [Rectangle((0, 0), 1, 1, color=BLUE), Rectangle((0, 0), 1, 1, color=VERM)]
-    a2.legend(handles, [f"policy won ({losses})", f"human won ({wins})"], loc="upper left",
+    a2.legend(handles, [f"agent won ({losses})", f"human won ({wins})"], loc="upper left",
               bbox_to_anchor=(0.0, 0.90), ncol=1, handlelength=1.0, borderaxespad=0.2)
     save(fig, out, "human_play.png")
     print(f"  {len(files)} match files, {len(recs)} vs {model} ({sum(other.values())} other opponents "
@@ -816,6 +807,172 @@ def fig_human_play(runs, out, chk):
           f"{sorted({r['greedy'] for r in recs})}; days {[str(d) for d in days]}")
 
 
+
+CLAUDE_MODELS = (("claude-fable-5-2", "Fable 5.2"), ("claude-opus-5-5", "Opus 5.5"), ("claude-sonnet-5-5", "Sonnet 5.5"),
+                 ("claude-haiku-5-5", "Haiku 5.5"))
+DRAW_GRAY = "#c4c4c4"  # lighter than MUTED so a draw cell separates from BLUE and VERM by lightness too
+SETUPS = (("xbow", True, "X-Bow\nmirror"), ("xbow", False, "X-Bow\nvs other"),
+          ("royal_hogs", True, "Royal Hogs\nmirror"), ("royal_hogs", False, "Royal Hogs\nvs other"))
+
+
+def claude_games(runs):
+    """Every finished Claude-vs-policy game against the released model, as one row per game (Claude's view).
+    Folders: runs/claude_games/S4_A_s1_10B/<model>[_<suffix>]/llm/ (one model may use several folders)."""
+    base = os.path.join(runs, "claude_games", "S4_A_s1_10B")
+    rows = []
+    for d in sorted(glob.glob(os.path.join(base, "claude-*", "llm", "state.json"))):
+        folder = os.path.basename(os.path.dirname(os.path.dirname(d)))
+        m = re.match(r"(claude-[a-z]+-\d+-\d+)", folder)
+        slug = m.group(1)
+        for k, g in load_json(d)["games"].items():
+            if g.get("status") != "done":
+                continue
+            gdir = os.path.join(os.path.dirname(d), f"game_{int(k):03d}")
+            meta = load_json(os.path.join(gdir, "meta.json"))
+            cc, pc = int(g["claude_crowns"]), int(g["policy_crowns"])
+            c = g["config"]
+            rows.append(dict(
+                model=slug, k=int(k), claude_deck=c["claude_deck"], policy_deck=c["policy_deck"],
+                mirror=bool(c["mirror"]), claude_team=int(c["claude_team"]), seed=int(meta["seed"]),
+                claude_crowns=cc, policy_crowns=pc,
+                # the draw rule: equal crowns at the end = draw (the engine's tower-HP tiebreak is ignored)
+                result="W" if cc > pc else "L" if cc < pc else "D",
+                engine_result={1: "claude", -1: "policy", 0: "draw"}[int(g["result"])],
+                end_reason=g["end_reason"], end_tick=int(g["ticks"]), decisions=int(g["decisions"]),
+                plays=int(g["plays"]), illegal=int(g["illegal"]), policy_step=int(g["policy"]["global_step"]),
+                replay=os.path.relpath(os.path.join(gdir, f"game_{int(k):03d}.gif"), base)))
+    return rows
+
+
+def fig_claude_games(runs, out, chk):
+    rows = claude_games(runs)
+    if not rows:
+        print("  no Claude games found; claude_games.png skipped")
+        return
+    names = dict(CLAUDE_MODELS)
+    models = [m for m, _ in CLAUDE_MODELS if any(r["model"] == m for r in rows)]
+    by = {(r["model"], r["k"]): r for r in rows}
+    assert len(by) == len(rows), "a game appears twice"
+    ks = sorted({r["k"] for r in rows})
+    per = len(ks)
+    assert all((m, k) in by for m in models for k in ks), "every model must have played the same games"
+    for k in ks:  # the same setup for every model: seed, decks, side
+        assert len({(by[m, k]["seed"], by[m, k]["claude_deck"], by[m, k]["policy_deck"], by[m, k]["claude_team"])
+                    for m in models}) == 1, f"game {k} differs between models"
+    steps = {r["policy_step"] for r in rows}
+    assert len(steps) == 1, steps
+    n = len(rows)
+    tot = Counter(r["result"] for r in rows)
+    score = {}
+    for m in models:
+        c = Counter(by[m, k]["result"] for k in ks)
+        s = c["W"] + 0.5 * c["D"]
+        score[m] = (c, s / per, *wilson(s, per))
+    wins = [r for r in rows if r["result"] == "W"]
+    mirror_x = [r for r in wins if r["claude_deck"] == "xbow" and r["mirror"]]
+    one_nil = all((r["claude_crowns"], r["policy_crowns"]) == (1, 0) for r in wins)
+
+    best = max(models, key=lambda m: score[m][1])
+    fig, top, bottom = frame(
+        3.15,
+        f"The agent outscored all {WORDS.get(len(models), len(models)).lower()} Claude models; "
+        f"{len(mirror_x)} of Claude's {len(wins)} wins came in X-Bow mirrors",
+        f"{n} games against the final agent ({next(iter(steps)) / 1e9:.1f}B steps), {per} per model, and every "
+        f"model got the same {per} setups (seed, decks, side). Claude reads a text description of the board and "
+        f"answers once per game second while the game waits; the agent acts every half second.",
+        foot=f"Claude's score = (wins + ½ draws) / games, with 95% intervals. A draw means equal crowns at the "
+             f"end (the engine's tower-HP tiebreak is ignored)."
+             + (f" Every Claude win was 1-0." if one_nil else "")
+             + " Claude ran through the Claude Code command line at low effort.")
+    H = fig.get_figheight()
+    y0, h = bottom + 0.88 / H, top - bottom - 1.56 / H
+    ys = {m: len(models) - 1 - i for i, m in enumerate(models)}
+    # left: Claude's score per model, with interval
+    a1 = fig.add_axes([0.155, y0, 0.215, h])
+    a1.axvline(0.5, color=AXIS, lw=1.2)
+    for m in models:
+        c, sc, lo, hi = score[m]
+        a1.plot([lo, hi], [ys[m]] * 2, color=VERM, lw=2.2, zorder=3)
+        a1.plot(sc, ys[m], marker="o", ms=9, color=VERM, mec="white", mew=1.2, zorder=4)
+        a1.text(hi + 0.03, ys[m], f"{sc:.2f}", ha="left", va="center", fontsize=11.5, fontweight="bold", color=INK)
+    a1.set_xlim(0, 1)
+    a1.set_ylim(-0.6, len(models) - 0.4)
+    a1.set_yticks([ys[m] for m in models])
+    a1.set_yticklabels([names[m] for m in models])
+    a1.tick_params(axis="y", length=0)
+    a1.set_xticks([0, 0.5, 1])
+    a1.set_xlabel("Claude's score")
+    a1.set_title("score, 95% CI", loc="left", fontsize=12, color=INK, pad=6)
+    # right: every game, grouped by setup (columns = games in order within a group)
+    a2 = fig.add_axes([0.43, y0, 0.47, h])
+    col = {"W": VERM, "L": BLUE, "D": DRAW_GRAY}
+    x, gap, centres, block = 0.0, 0.9, [], []
+    for deck, mir, label in SETUPS:
+        gk = [k for k in ks if by[models[0], k]["claude_deck"] == deck and by[models[0], k]["mirror"] == mir]
+        if not gk:
+            continue
+        x0 = x
+        for k in gk:
+            for m in models:
+                a2.add_patch(Rectangle((x + 0.07, ys[m] - 0.36), 0.86, 0.72, color=col[by[m, k]["result"]], lw=0))
+            x += 1
+        sub = [by[m, k] for m in models for k in gk]
+        cs = Counter(r["result"] for r in sub)
+        centres.append(((x0 + x) / 2, label, (cs["W"] + 0.5 * cs["D"]) / len(sub), len(gk)))
+        block.append((deck, mir, cs, len(sub)))
+        x += gap
+    xmax = x - gap
+    for cx, label, s, ng in centres:
+        a2.text(cx, len(models) - 0.45, label, ha="center", va="bottom", fontsize=10.5, color=INK2, linespacing=1.1)
+        a2.text(cx, -0.75, f"{math.floor(s * 100 + 0.5) / 100:.2f}", ha="center", va="top", fontsize=11,
+                fontweight="bold", color=INK)  # half up: 3/24 = 0.125 -> 0.13
+    a2.text(xmax / 2, -1.28, "Claude's score in each setup", ha="center", va="top", fontsize=10.5, color=INK2)
+    for m in models:
+        c = score[m][0]
+        a2.text(xmax + 0.35, ys[m], f"{c['W']}-{c['D']}-{c['L']}", ha="left", va="center", fontsize=10.5,
+                color=INK2)
+    a2.text(xmax + 0.35, len(models) - 0.45, "Claude\nW-D-L", ha="left", va="bottom", fontsize=10.5, color=INK2,
+            linespacing=1.1)
+    a2.set_xlim(-0.1, xmax + 0.1)
+    a2.set_ylim(-0.6, len(models) - 0.4)
+    a2.axis("off")
+    handles = [Rectangle((0, 0), 1, 1, color=VERM), Rectangle((0, 0), 1, 1, color=DRAW_GRAY),
+               Rectangle((0, 0), 1, 1, color=BLUE)]
+    a2.legend(handles, [f"Claude won ({tot['W']})", f"draw ({tot['D']})", f"agent won ({tot['L']})"],
+              loc="upper center", bbox_to_anchor=(0.5, -0.30), ncol=3, handlelength=1.0, borderaxespad=0.2,
+              columnspacing=1.2)
+    a2.set_title("every game, grouped by setup", loc="left", fontsize=12, color=INK, pad=36)
+    save(fig, out, "claude_games.png")
+    # the per-game table behind the figure (also read by the play site's "Games against language models")
+    summ = {m: dict(name=names[m], games=per, w=score[m][0]["W"], d=score[m][0]["D"], l=score[m][0]["L"],
+                    score=round(score[m][1], 4), ci=[round(score[m][2], 4), round(score[m][3], 4)]) for m in models}
+    s_all = tot["W"] + 0.5 * tot["D"]
+    lo, hi = wilson(s_all, n)
+    data = dict(policy=dict(run="S4_A_s1", file="model_610352.pt", global_step=next(iter(steps))),
+                draw_rule="equal crowns at the end = draw (the engine's tower-HP tiebreak is ignored)",
+                score="Claude's (wins + draws/2) / games, 95% Wilson interval",
+                models=summ, total=dict(games=n, w=tot["W"], d=tot["D"], l=tot["L"], score=round(s_all / n, 4),
+                                        ci=[round(lo, 4), round(hi, 4)]),
+                setups=[dict(claude_deck=d_, mirror=mi, games=ng_, w=cs_["W"], d=cs_["D"], l=cs_["L"],
+                             score=round((cs_["W"] + 0.5 * cs_["D"]) / ng_, 4)) for d_, mi, cs_, ng_ in block],
+                games=sorted(rows, key=lambda r: (models.index(r["model"]), r["k"])))
+    with open(os.path.join(out, "claude_games.json"), "w") as f:
+        json.dump(data, f, indent=1)
+        f.write("\n")
+    print(f"wrote {os.path.join(out, 'claude_games.json')}")
+    print(f"  {n} games, {len(models)} models x {per}; Claude W {tot['W']} D {tot['D']} L {tot['L']} = "
+          f"{s_all / n:.4f} [{lo:.4f},{hi:.4f}]; " + "; ".join(
+              f"{names[m]} {score[m][0]['W']}-{score[m][0]['D']}-{score[m][0]['L']} {score[m][1]:.2f} "
+              f"[{score[m][2]:.2f},{score[m][3]:.2f}]" for m in models)
+          + f"; wins in X-Bow mirrors {len(mirror_x)}/{len(wins)}; all 1-0: {one_nil}; best {names[best]}")
+    # the selection log states each model's policy-side W-D-L and score for the 100 games
+    m_ = chk.find(r"All 100 games \(25 per model\): (\d+) W (\d+) D (\d+) L, ([\d.]+)")
+    if m_:
+        for i, key in enumerate(("L", "D", "W")):  # the log counts from the policy's side
+            chk.cmp(f"claude games: policy {'WDL'[i]}", tot[key], m_.group(i + 1))
+        chk.cmp("claude games: policy score", 1 - s_all / n, m_.group(4))
+
+
 FIGURES = {
     "training_curve": fig_training_curve,
     "selection_br": fig_selection_br,
@@ -823,6 +980,7 @@ FIGURES = {
     "floor_ablation": fig_floor_ablation,
     "stage5_round_robin": fig_stage5_rr,
     "human_play": fig_human_play,
+    "claude_games": fig_claude_games,
 }
 
 

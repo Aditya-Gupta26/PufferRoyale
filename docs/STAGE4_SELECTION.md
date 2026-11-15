@@ -16,9 +16,9 @@ logged under "Deviations" with its reason.
 | 2 | Exploitability: 2 BR seeds per candidate | 21005306 (GPU array 0-17%4); its tasks 0-5 failed and rerun as 21343356 (array 0-5%2, deviation 1) | **done** 2026-10-31 (18 of 18) |
 | 3 | Select the winner (rule below) | – | **done** 2026-11-01: **S4_A_s1** (deviation 2) |
 | 3b | From-scratch attackers (1B) vs S4_A_s1 and C@1.55B | 21630359 (GPU array 0-3%4, H100/H200); A100 copy 21778800 (array 0-3%4, deviation 3) | **done** 2026-11-05: S4_A_s1 0.0745 / 0.166 (score 0.500), C@1.55B 0.3485 / 0.2295 (0.500, reported only): **S4_A_s1 stays the winner** |
-| 4a | Winner's config, branched from its latest snapshot, 4 floors | S4L_A_s1_{ctrl,f05,f10,f20}: 22014154/56, 22014157/58, 22014161/62, 22014164/65 (2 links each, deviation 4) | submitted 2026-11-05 19:33 |
-| 4b | Winner's config from scratch, floors not yet covered | S4f05_A_s1 22014171/78/80/83, S4f10_A_s1 22014197/98, 22014202/03, S4f20_A_s1 22014245, 22014284/85/86 (4 links each) | submitted 2026-11-05 19:34 |
-| 5 | Exploitability (and a round robin) of every stage-4 arm; verdict | 4a: BR 22422166 (GPU array 0-7%4), round robin 22422168 (CPU array 0-1); 4b: after its runs | 4a submitted 2026-11-09 11:34; 4b waits for its runs |
+| 4a | Winner's config, branched from its latest snapshot, 4 floors | S4L_A_s1_{ctrl,f05,f10,f20}: 22014154/56, 22014157/58, 22014161/62, 22014164/65 (2 links each, deviation 4) | **done** 2026-11-09 (all four at snap_671139, 10.996B) |
+| 4b | Winner's config from scratch, floors not yet covered | S4f05_A_s1 22014171/78/80/83, S4f10_A_s1 22014197/98, 22014202/03, S4f20_A_s1 22014245, 22014284/85/86 (4 links each) | **done** 2026-11-12 11:18 (all three at snap_152640, 2,500,853,760 steps) |
+| 5 | Exploitability (and a round robin) of every stage-4 arm; verdict | 4a: BR 22422166 (GPU array 0-7%4), round robin 22422168 (CPU array 0-1); 4b: dry run `runs/stage4/S5b/dryrun/` | **done** 2026-11-14: **control in both families** (4a S4L_A_s1_ctrl snap_671139; 4b S4_A_s1 snap_152640); 4b: BR 22933924, round robin 22933925 |
 
 ## Candidates (the stage-1 checkpoints; stage 2 uses the same files)
 
@@ -596,3 +596,447 @@ file mis-aligned keys and is discarded.)
 - 2026-11-09 19:40: **follow-up corrected (user, 2026-11-09: "No - against fable-5-2")**: the Fable games use Fable 5.2,
   not claude-fable-5-1 as written at 19:20. CLI name assumed `claude-fable-5-2` (not yet checked: the one-call test
   before the games confirms it). Games: 20 each for Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5 = 80. Still not started.
+- 2026-11-10 03:00: **4b link 2 -> link 3 (S4f05, S4f10)**: S4f05 (22014178_0) and S4f10 (22014198_0) link 2 ended
+  TIMEOUT at the 20 h limit (02:49:03 / 02:49:33) at 2,345,648,128 / 2,355,462,144 steps (last log lines); last
+  snapshots `snap_143100.pt` (02:48, 2,344,550,400 steps) / `snap_143577.pt` (02:46, 2,352,365,568 steps), the
+  resume points of link 3. Left to 2,500,853,760: 0.156B / 0.148B (about 2.3-2.4 h at 18,000 steps/s). Link 3
+  (22014180_0 / 22014202_0) is PENDING with reason QOSMaxGRESPerUser: the per-user GPU cap of QOS gpu48 reads
+  gres/gpu=0 now (Torch has shown it at 2, 0 and 16 before), with 1 GPU of ours in use (S4f20 link 2, ends 03:38).
+  The stage 5 (4a) BR array 22422166 waits for the same reason. Nothing to change on our side (no-cancel rule; Torch
+  does not allow edits to pending jobs); they start when the cap rises.
+- 2026-11-10 03:45: **4b S4f20 link 2 ended; GPU cap back**: S4f20 (22014284_0) link 2 ended TIMEOUT at 03:39:13 at
+  2,318,008,320 steps (last log line); last snapshot `snap_141192.pt` (03:35, 2,313,289,728 steps), 0.188B left
+  (about 2.9 h at 17,750 steps/s). At 03:41 the gpu48 per-user cap reads gres/gpu=16 again; the three link 3s
+  (22014180_0, 22014202_0, 22014285_0) and the BR array 22422166 are PENDING with reason None (waiting for a node).
+- 2026-11-10 17:10: **Claude games started (user, 2026-11-10: "On our best model - lets start the claude games -> play 3
+  Fable 5-2 based games")**. Model: the current best, S4_A_s1 `model_610352.pt` (10,000,007,168 steps; sha256 46c62cdd...,
+  = the released `models/S4_A_s1_10B.pt`); the stage 5 verdicts are still pending. One-call check (login node, 17:00,
+  the relay's exact flags, effort low): `claude-fable-5-2` answers (modelUsage `claude-fable-5-2`, 7.8 s, a valid
+  `PLAY 3 AT 5,25`). Setup = the D101 harness, the same as the earlier 63 Opus games: `hpc/llm.sbatch` (now takes
+  `LLM_RUN_DIR`, a folder with the run's config.json and a link to the checkpoint) + `hpc/llm_game.py` +
+  `hpc/llm_relay.py` (Claude Code CLI on the owner's login, no API key), checkout 3cd765c, effort low, decisions every
+  20 ticks (1 s), the policy every 10 ticks, sampled actions; the 20-game cycle of `llm_game.py` (LLM_EVERY 500M of
+  the 10B total, every game against the same file): games 1-3 = Claude xbow vs xbow, royal_hogs vs royal_hogs, xbow vs
+  hog26, Claude team 0, seeds crc32("S4_A_s1:k") (the same seeds for every Claude model). Folder
+  `runs/claude_games/S4_A_s1_10B/claude-fable-5-2/` (`job.env`, `llm/state.json`, `llm/game_00k/`). Job 22595211
+  (pr-cg-fable52, cs629, cpu48, 4 h limit, `--max-games 3`); game 1 started 17:05, about 4.5 s per decision.
+- 2026-11-10 18:10: **Claude games, Fable 5.2, games 1-3 done** (job 22595211 COMPLETED 18:04 after 1:02:01; 497 CLI
+  calls, 0 failed, 0 illegal plays, 0 parse errors; mean 6.5-7.0 s per call; the CLI's list-price estimate $18.64 in
+  total, on the owner's plan, no API key). Claude's result (team 0; tiebreak = the weakest surviving crown tower,
+  absolute HP, SPEC 4):
+
+  | game | Claude deck vs policy deck | result (Claude) | crowns | end | weakest tower Claude / policy | decisions (plays) |
+  |---|---|---|---|---|---|---|
+  | 1 | xbow vs xbow | **win** | 0-0 | tiebreak at 6000 | 961 / 757 | 186 (81) |
+  | 2 | royal_hogs vs royal_hogs | loss | 0-1 | regulation crowns at 3600 | 515 / 509 (one Princess tower lost) | 97 (34) |
+  | 3 | xbow vs hog26 | loss | 0-0 | tiebreak at 6000 | 688 / 2,173 | 214 (78) |
+
+  Fable 5.2 score 1.0 / 3 = 0.333 (1 W, 0 D, 2 L); n = 3, no interval worth stating. Replays
+  `runs/claude_games/S4_A_s1_10B/claude-fable-5-2/llm/game_00{1,2,3}/game_00k.gif`, every tick in
+  `frames.jsonl.gz`, Claude's replies in `decisions.jsonl`. Games 4-20 not started.
+- 2026-11-10 18:20: **counting rule for the Claude games (user, 2026-11-10: "from now on - when there's a draw - lets
+  count it as a draw not a win/loss")**: a game that ends with equal crowns counts as a draw (0.5), whatever the
+  engine's tiebreak says (the engine still plays to the tiebreak and records it; only the count changes). Recount of
+  Fable 5.2 games 1-3 from the policy's side: game 1 (0-0, tiebreak) draw, game 2 (policy 1-0) win, game 3 (0-0,
+  tiebreak) draw = **policy 1 W, 2 D, 0 L, score 0.667; Fable 0 W, 2 D, 1 L, 0.333** (the same 0.333 as the tiebreak
+  count above, by coincidence: 1 W 2 L then, 2 D 1 L now). The tiebreak result stays in each `result.json`.
+  Not applied to the stage 1-5 selection scores (rules written before the results; changing them is the user's call).
+- 2026-11-10 19:45: **Claude games, Fable 5.2, games 4-10 started (user, 2026-11-10: "now lets play 7 more matches
+  against Fable 5.2")**: job 22609722 (pr-cg-fable52, cs608, 6 h limit), env `job_games4-10.env` (= `job.env` with
+  `--max-games 7`), resuming from `llm/state.json` (games 1-3 done). Schedule (Claude deck vs policy deck, Claude's
+  team): 4 royal_hogs vs hog26 (0); 5 xbow vs xbow (1); 6 royal_hogs vs royal_hogs (1); 7 xbow vs giant (1); 8
+  royal_hogs vs giant (1); 9 xbow vs xbow (0); 10 royal_hogs vs royal_hogs (0). Counted with the draw rule (equal
+  crowns = draw). Submitted 19:41:30, game 4 started 19:41. (Times corrected at 20:10: first written as 18:35 /
+  18:31 by my mistake.)
+- 2026-11-10 20:10: **Fable 5.2 game 4 done**: Claude royal_hogs (team 0) vs policy hog26: policy 1-0 in overtime
+  (OVERTIME_CROWNS, 861 s, 112 decisions). Running count (policy's side, draw rule), games 1-4: 2 W, 2 D, 0 L. Game 5
+  (xbow mirror, Claude team 1) in progress: 0-0 with 0:31 of regulation left, Claude's weakest tower 3,017, the
+  policy's 850.
+- 2026-11-10 21:45: **Claude games, Fable 5.2, games 4-10 done** (job 22609722 COMPLETED 21:37 after 1:55:38; 902 CLI
+  calls, 0 failed; 1 illegal play (game 9), 0 parse errors; mean 6.7-7.8 s per call; list-price estimate $31.56).
+  All 10 games, counted from the policy's side with the draw rule (equal crowns = draw; the engine's tiebreak winner
+  is in `result.json` but not counted):
+
+  | game | Claude deck vs policy deck | Claude team | crowns Claude-policy | end (tick) | policy's result | weakest tower Claude / policy |
+  |---|---|---|---|---|---|---|
+  | 1 | xbow vs xbow | 0 | 0-0 | tiebreak (6000) | draw | 961 / 757 |
+  | 2 | royal_hogs vs royal_hogs | 0 | 0-1 | regulation crowns (3600) | win | 515 / 509 |
+  | 3 | xbow vs hog26 | 0 | 0-0 | tiebreak (6000) | draw | 688 / 2,173 |
+  | 4 | royal_hogs vs hog26 | 0 | 0-1 | overtime crowns (4337) | win | 3,052 / 1,757 |
+  | 5 | xbow vs xbow | 1 | 1-0 | regulation crowns (3600) | **loss** | 2,982 / 678 |
+  | 6 | royal_hogs vs royal_hogs | 1 | 0-1 | regulation crowns (3600) | win | 1,927 / 591 |
+  | 7 | xbow vs giant | 1 | 0-0 | tiebreak (6000) | draw | 485 / 2,100 |
+  | 8 | royal_hogs vs giant | 1 | 1-3 | King destroyed (3599) | win | 278 / 1,507 |
+  | 9 | xbow vs xbow | 0 | 0-1 | overtime crowns (3650) | win | 2,569 / 1,993 |
+  | 10 | royal_hogs vs royal_hogs | 0 | 0-1 | overtime crowns (4421) | win | 3,052 / 1,557 |
+
+  **Policy vs Fable 5.2 after 10 games: 6 W, 3 D, 1 L, score 0.75** (Fable 1 W, 3 D, 6 L = 0.25). By Claude's deck:
+  royal_hogs games (2, 4, 6, 8, 10) policy 5 W of 5; xbow games (1, 3, 5, 7, 9) 1 W, 3 D, 1 L. Wilson 95% interval on
+  the score with n = 10 is wide (draws make it inexact; treating 7.5/10 as a proportion gives [0.44, 0.92]). Games 11-20 not started.
+- 2026-11-10 22:35: **Claude games, Haiku 5.5, games 1-10 started (user, 2026-11-10: "lets do 10 games against Haiku
+  nlw")**. One-call check (login node, 22:2x, the relay's flags, effort low): `claude-haiku-5-5` answers (modelUsage
+  `claude-haiku-5-5`, 5.5 s, a valid `PLAY 3 AT 6,22`). Folder `runs/claude_games/S4_A_s1_10B/claude-haiku-5-5/`:
+  the same config.json, checkpoint link (sha256 46c62cdd...), checkout 3cd765c, effort low, LLM_EVERY 500M and seeds as
+  the Fable 5.2 games (`job.env` differs only in LLM_RUN_DIR, LLM_MODEL and `--max-games 10`), so games 1-10 repeat
+  Fable's 10 setups exactly. Job 22623622 (pr-cg-haiku55, cs680, 6 h limit) started 22:31; first decisions 4-5.5 s.
+  Counted with the draw rule.
+- 2026-11-10 23:35: **Claude games, Haiku 5.5, games 1-10 done** (job 22623622 COMPLETED 23:26 after 0:54:35; 633 CLI
+  calls, 0 failed; 0 illegal plays, 0 parse errors; mean 4.5 s per call; list-price estimate $0.37). Policy's result
+  per game (draw rule), next to Fable 5.2 in the same setup (same seed, decks, seats):
+
+  | game | Claude deck vs policy deck | Claude team | Haiku: crowns Claude-policy, end | policy vs Haiku | policy vs Fable |
+  |---|---|---|---|---|---|
+  | 1 | xbow vs xbow | 0 | 0-1, regulation | win | draw |
+  | 2 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win | win |
+  | 3 | xbow vs hog26 | 0 | 0-1, regulation | win | draw |
+  | 4 | royal_hogs vs hog26 | 0 | 0-1, regulation | win | win |
+  | 5 | xbow vs xbow | 1 | 0-1, regulation | win | loss |
+  | 6 | royal_hogs vs royal_hogs | 1 | 0-3, King destroyed at tick 3,231 | win | win |
+  | 7 | xbow vs giant | 1 | 1-2, regulation | win | draw |
+  | 8 | royal_hogs vs giant | 1 | 1-2, regulation | win | win |
+  | 9 | xbow vs xbow | 0 | 0-0, tiebreak (6000) | draw | win |
+  | 10 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win | win |
+
+  **Policy vs Haiku 5.5: 9 W, 1 D, 0 L, score 0.95** (proportion-style Wilson 95% about [0.66, 0.99]); vs Fable 5.2:
+  6 W, 3 D, 1 L, 0.75 ([0.44, 0.92]). Style difference (from `result.json`): Haiku plays a card on 72% of its turns
+  (453 of 633), Fable on 36% (506 of 1,399); a turn is skipped when no card is affordable, so Haiku's games have
+  fewer turns (34-126 vs 88-214). Haiku games 11-20 not started.
+- 2026-11-11 14:22: **Claude games, Sonnet 5.5, games 1-10 started (user, 2026-11-11: "Lets play 10 Sonnet games
+  now")**. One-call check (login node, 14:20, the relay's flags, effort low): `claude-sonnet-5-5` answers (modelUsage
+  `claude-sonnet-5-5`, 6.1 s, `WAIT`). Folder `runs/claude_games/S4_A_s1_10B/claude-sonnet-5-5/`: the same config.json,
+  checkpoint link (sha256 46c62cdd...), checkout 3cd765c, effort low, LLM_EVERY 500M, seeds and `--max-games 10` as the
+  Haiku games (`job.env` differs only in LLM_RUN_DIR and LLM_MODEL). Job 22718409 (pr-cg-sonnet55, cs660, 6 h limit)
+  started 14:19:57; first decisions 4-8.6 s. Counted with the draw rule. Queue at 14:18: the 4b link 3s and the BR
+  array 22422166 PENDING with reason QOSGrpGRES (the QOS's group GPU total is in use; per-user cap 16).
+- 2026-11-11 16:40: **Claude games, Sonnet 5.5, games 1-10 done** (job 22718409 COMPLETED 16:34 after 2:14:05; 1,522
+  CLI calls, 0 failed; 0 parse errors; 11 illegal plays; mean about 4.7 s per call; list-price estimate $14.37).
+  Illegal plays were checked in `decisions.jsonl` and the turn files: in each case Sonnet picked a tile missing from the
+  LEGAL TILES list it was given, e.g. game 3 turn 13 "PLAY 1 AT 15,19" (Ice Spirit) while its own X-Bow at (14,18)
+  covered tx 13-15 of row 19. The harness then plays WAIT for that turn. Policy's result per game (draw rule), next to
+  Fable 5.2 and Haiku 5.5 in the same setup (same seed, decks, seats):
+
+  | game | Claude deck vs policy deck | Claude team | Sonnet: crowns Claude-policy, end | policy vs Sonnet | vs Fable | vs Haiku |
+  |---|---|---|---|---|---|---|
+  | 1 | xbow vs xbow | 0 | 1-0, overtime (tick 4,437) | loss | draw | win |
+  | 2 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win | win | win |
+  | 3 | xbow vs hog26 | 0 | 0-0, tiebreak (6000) | draw | draw | win |
+  | 4 | royal_hogs vs hog26 | 0 | 0-1, regulation | win | win | win |
+  | 5 | xbow vs xbow | 1 | 1-0, overtime (tick 4,995) | loss | loss | win |
+  | 6 | royal_hogs vs royal_hogs | 1 | 0-1, regulation | win | win | win |
+  | 7 | xbow vs giant | 1 | 0-1, regulation | win | draw | win |
+  | 8 | royal_hogs vs giant | 1 | 1-3, King destroyed in overtime (tick 4,592) | win | win | win |
+  | 9 | xbow vs xbow | 0 | 0-0, tiebreak (6000) | draw | win | draw |
+  | 10 | royal_hogs vs royal_hogs | 0 | 0-1, overtime (tick 4,813) | win | win | win |
+
+  **Policy vs Sonnet 5.5: 6 W, 2 D, 2 L, score 0.70** (proportion-style Wilson 95% about [0.40, 0.89]). Fable 0.75
+  ([0.44, 0.92]), Haiku 0.95 ([0.66, 0.99]); all 30 games 21 W 6 D 3 L, 0.80 ([0.63, 0.91]). By Claude's deck: Royal
+  Hogs 15 of 15 policy wins across the three models; X-Bow 6 W 6 D 3 L (0.60, [0.36, 0.80]). Both Sonnet wins are X-Bow
+  mirrors decided in overtime. Game 5: at tick 4,460 the policy's towers were 2,255 and 2,870 and Sonnet's right tower
+  790; Sonnet's Archers plus a Fireball (tick 4,940, tower to 80 HP) took the policy's tower at tick 4,995. Game 8: 1-1
+  at the end of regulation, Sonnet's King at 36 HP from about tick 3,780, destroyed at 4,592. Style: Sonnet plays a card
+  on 31% of its calls (479 of 1,522), Fable 36%, Haiku 72%. Sonnet games 11-20 not started. Queue at 16:35: BR array
+  22422166 and 4b link 3s PENDING; squeue --start estimate 2026-11-12 20:17 for all four (scheduler estimate only).
+- 2026-11-12 21:20 (time corrected; first written as 21:40): **stage 5 (4a) BR array done; verdict for the 4a family: the control.** Job 22422166, all 8 tasks
+  COMPLETED 2026-11-12 between 05:18 and 10:12 (started 02:43-07:39, 2.5-2.7 h each, A100/H100 nodes gh003-gh015). All 8
+  outputs `runs/eval/br_S5a_S4L_A_s1_<arm>_s<seed>.json` checked against `br_manifest.txt` (target, seed, 1000 matches,
+  150,011,904 >= 150M steps, random decks both sides, init_from_target, br_score = (W + D/2)/1000, W+D+L = 1000): no
+  mismatch; no "error"/"traceback" in the task logs. The W&B levelling-off check (rule 2, not a rule) is not done yet.
+
+  | arm (snap_671139) | seed 0: W-D-L, br_score | seed 1: W-D-L, br_score | mean (as written) | mean, < 0.5 read as 0.5 (dev. 2) | rr Elo |
+  |---|---|---|---|---|---|
+  | ctrl | 436-0-564, 0.4360 | 470-0-530, 0.4700 | 0.4530 | **0.5000** | 1634 |
+  | f10 | 456-11-533, 0.4615 | 541-34-425, 0.5580 | 0.5098 | 0.5290 | 1523 |
+  | f05 | 582-140-278, 0.6520 | 614-84-302, 0.6560 | 0.6540 | 0.6540 | 1493 |
+  | f20 | 697-2-301, 0.6970 | 708-2-290, 0.7080 | 0.7025 | 0.7025 | 1349 |
+
+  - Rule 3 with deviation 2: lowest 0.500 (ctrl), tie band <= 0.550 holds ctrl and f10 (0.529); Elo tie-break ctrl
+    1634 > f10 1523: **ctrl**. Rule 3 as written (no deviation): ctrl 0.453 lowest, f10 0.057 away, no tie: **ctrl**.
+    Both readings agree.
+  - Exploits found: f05 and f20 in both seeds (0.652 / 0.656, 0.697 / 0.708); f10 in one seed (0.558; other 0.4615);
+    the control in neither (0.436, 0.470). Order of exploitability = order of the round robin (ctrl best, f20 worst).
+  - Training score vs target at the end (from the same files): ctrl 0.520 / 0.512, f05 0.643 / 0.645, f10 0.545 / 0.528,
+    f20 0.713 / 0.704.
+  - Meaning for 4a: on S4_A_s1 at 10B, a constant card floor (0.05 / 0.10 / 0.20) for 1B more steps made the model more
+    exploitable and weaker in the round robin than continuing its own schedule (floor 0 after 5B).
+  - Not measured: the control at 11.0B (S4L_A_s1_ctrl/snap_671139) against the released S4_A_s1 10B
+    (model_610352); which file is "the best model" (Claude games, release) is the user's call after 4b.
+- 2026-11-12 21:20 (time corrected; first written as 21:40): **4b runs done.** Link 3s 22014180_0 (gh006, 08:01-10:30), 22014202_0 (gh009, 08:01-10:28),
+  22014285_0 (gh015, 08:11-11:17) COMPLETED; each resumed one epoch after the snapshot recorded on 11-10 (first log
+  lines: epoch 143101 / 143578 / 141193, floor 0.0500 / 0.1000 / 0.2000), checkout 3cd765c, and stopped at global step
+  2,500,853,760 (epoch 152640, `summary_<job>.json`). Configs: seed 1, init_from None, total 2,500,853,760,
+  card_floor 0.05 / 0.1 / 0.2, card_floor_steps 0. Stage-5 checkpoints: `snap_152640.pt` of each (= its
+  `model_152640.pt` tensor for tensor). Link 4s 22014183 / 22014203 / 22014286 still PENDING (Priority): they will start
+  and exit at once (the runs are complete), as 19555051_3 did on 2026-11-11 23:30 (COMPLETED in 36 s); left queued
+  (no-cancel rule).
+- 2026-11-12 21:22 (time corrected; first written as 21:45): **stage 5 dry run, 4b family (nothing submitted)**, `runs/stage4/S5b/dryrun/`, rule 5 as written,
+  built from the 4a dry run (diffs checked):
+  - **Targets:** `league/{S4_A_s1,S4f05_A_s1,S4f10_A_s1,S4f20_A_s1}/snap_152640.pt` (2,500,853,760 steps; the control
+    is the winner's own run at 2.5B, rule 4). Each loads, 40 tensors with S4_A_s1 snap_476523's shapes; four different
+    files (sha256 9124642, 18eb67e, a3e43d6, b3ddf2b).
+  - **BR:** `br_manifest.txt` (tasks 0-3 = S4_A_s1, S4f05, S4f10, S4f20 with seed 0; 4-7 seed 1; names `S5b_<run>`,
+    outputs `runs/eval/br_S5b_<run>_s<seed>.json`, none exists yet); `br_array.sbatch` = the 4a one except the comment,
+    W&B group S5b_BR and the tag prefix; BR_STEPS 150M, the rule-2 FLAGS, checkout pinned/s4x_3cd765c, `--array=0-7%4`.
+  - **Round robin:** `plan_rr_s5b.py` (= `plan_rr_s5a.py` with the 4 checkpoints) -> `rr/plan.json`, `rr/tasks.jsonl`
+    (54 tasks = 6 pairs x 9 presets, 200 matches each, seed 0); `rr/out/` created (the 2026-11-09 error).
+  - `sbatch --test-only` accepted both (estimates: BR 2026-11-15 12:48 on an A100; round robin 2026-11-20 on cs613;
+    estimates only). Commands in `commands.txt`. Waits for the user's go.
+- 2026-11-12 21:24: **stage 5, 4b family, submitted** (user, 2026-11-12: "4b is a go"). `runs/stage4/S5b/sub_20261112_212401/`
+  = the dry run copied (its `rr/out` exists and is empty; no plan or manifest file refers to the dry-run folder;
+  `commands.txt` paths updated): BR array **22933924** (`--array=0-7%4`, pr-s5br, the dry run's manifest, FLAGS,
+  BR_STEPS 150,000,000, checkout pinned/s4x_3cd765c) and round robin **22933925** (`hpc/stage4_eval.sbatch --array=0-1`,
+  EVAL_DIR = the submission's `rr/`). Job ids in `jobids.txt`. At 21:24: BR PENDING (reason None), round robin PENDING
+  (Priority). At most 4 GPUs at once (the 4b training links are done).
+- 2026-11-14 08:55: **stage 5 (4b) done; verdict for the 4b family: the control** (S4_A_s1 at snap_152640, the winner's
+  own run at 2.5B). BR array 22933924: all 8 tasks COMPLETED 2026-11-13 between 10:42 and 23:46 (2.6-3.4 h each,
+  gh004-gh014 and ga021). All 8 outputs `runs/eval/br_S5b_<run>_s<seed>.json` checked against `br_manifest.txt` as for
+  4a: no mismatch; no "error"/"traceback" in the BR or round-robin logs. Round robin 22933925_0/_1 COMPLETED 2026-11-13
+  09:38 / 09:39 (12-13 min, cs702 / cs704), 54 of 54 outputs, merged with the pinned checkout:
+  `runs/stage4/S5b/sub_20261112_212401/rr/summary.{json,md}`. The 4b link 4s (22014183_0 / 22014203_0 / 22014286_0)
+  started 2026-11-13 07:59-08:02 and exited in 26-45 s, as expected.
+
+  | arm (snap_152640) | seed 0: W-D-L, br_score | seed 1: W-D-L, br_score | mean (as written) | mean, < 0.5 read as 0.5 (dev. 2) | rr Elo |
+  |---|---|---|---|---|---|
+  | ctrl = S4_A_s1 | 422-138-440, 0.4910 | 365-253-382, 0.4915 | 0.4912 | **0.5000** | 1566 |
+  | f05 | 680-0-320, 0.6800 | 622-0-378, 0.6220 | 0.6510 | 0.6510 | 1491 |
+  | f10 | 688-86-226, 0.7310 | 595-127-278, 0.6585 | 0.6947 | 0.6947 | 1520 |
+  | f20 | 735-3-262, 0.7365 | 692-0-308, 0.6920 | 0.7143 | 0.7143 | 1423 |
+
+  Round robin (9 preset mirrors, 1,800 matches per pair, row's score vs column, 95% Wilson):
+
+  | row vs col | ctrl | f05 | f10 | f20 | Elo | Nash |
+  |---|---|---|---|---|---|---|
+  | ctrl | – | 0.628 [0.605,0.650] | 0.614 [0.591,0.636] | 0.623 [0.600,0.645] | 1566 | 1.00 |
+  | f05 | 0.372 | – | 0.492 [0.469,0.515] | 0.586 [0.563,0.609] | 1491 | 0.00 |
+  | f10 | 0.386 | 0.508 | – | 0.718 [0.697,0.738] | 1520 | 0.00 |
+  | f20 | 0.378 | 0.414 | 0.282 | – | 1423 | 0.00 |
+
+  - Rule 3 with deviation 2: ctrl 0.500, next f05 0.651 (0.151 away): no tie, **ctrl**. As written: ctrl 0.491, the
+    same. Both readings agree.
+  - Exploits found in both seeds of every floor arm (0.62-0.74); none against the control (0.491, 0.4915; its BRs draw
+    138 and 253 of 1000). The control also beats each floor arm head to head (0.61-0.63, no interval touches 0.5).
+  - **Stage 5 overall: in both families (from 10B continued, and from scratch to 2.5B) the control, i.e. S4_A_s1's own
+    floor schedule (0.005 faded to 0 by 5B), is the least exploitable and the highest-Elo arm. A constant floor of
+    0.05-0.20 never helped.**
+  - Still open (user): whether the 4a control at 11.0B (S4L_A_s1_ctrl/snap_671139) replaces the released S4_A_s1 10B
+    (model_610352) as "the best model"; the two have not been compared directly.
+- 2026-11-14 08:54: **Claude games, Sonnet 5.5, games 11-20 started** (user, 2026-11-14: "please run 10 more Sonnet
+  games"). One-call check (login node, 08:53, the relay's flags, effort low, RULES_PROMPT extracted from the pinned
+  checkout, Sonnet game 10's turn 5): `claude-sonnet-5-5` answers (modelUsage `claude-sonnet-5-5`, 10.0 s, `WAIT`).
+  `job_games11-20.env` = `job.env` except the comment (same model, run dir, checkpoint link, LLM_EVERY 500M,
+  `--max-games 10`, which resumes from `llm/state.json` with games 1-10 done). Job 23119369 (pr-cg-sonnet55, cs601,
+  6 h limit) running at 08:54; game 11 = Claude xbow vs policy bait, Claude team 0. Counted with the draw rule.
+- 2026-11-14 09:05: **Claude games, Opus 5.5, games 1-10 started, in parallel with Sonnet 11-20** (user, 2026-11-14:
+  "in parallel - run Opus 1-10 too"). Checks first: (1) the relay retries a failed call (e.g. a usage limit) with
+  back-off and after 3 h of failures (`--max-wait` 10800) aborts the game, which `llm_game.py` retries later (up to 3
+  tries), so a limit stalls games instead of turning Claude's moves into WAITs; (2) the game waits for each reply
+  (`FileRelay`, up to 14400 s), so call speed cannot change a result; (3) the 63 earlier `claude-opus-5-5` games
+  (D101, league/*/llm) cost a list-price estimate of $2.21 per game (130 calls per game, 0 failed calls). One-call
+  check (login node, 09:03, the relay's flags, effort low): `claude-opus-5-5` answers (modelUsage `claude-opus-5-5`,
+  7.3 s, `WAIT`). Folder `runs/claude_games/S4_A_s1_10B/claude-opus-5-5/`: config.json identical to Sonnet's,
+  checkpoint link (sha256 46c62cdd...), `job.env` = Sonnet's except comment, LLM_RUN_DIR and LLM_MODEL. Job 23119788
+  (pr-cg-opus55, cs621, 6 h limit) running at 09:04; game 1 has Sonnet game 1's seed, decks and seat. Counted with the
+  draw rule.
+- 2026-11-14 10:50: **Claude games, Opus 5.5, games 1-10 done** (job 23119788 COMPLETED 10:47 after 1:43:21, in parallel
+  with Sonnet 11-20 the whole time; 1,213 CLI calls, 0 failed, 0 retries; 0 parse errors; 3 illegal plays; mean
+  4.5 s per call; list-price estimate $19.83). Policy's result per game (draw rule), same setups as the other models:
+
+  | game | Claude deck vs policy deck | Claude team | Opus: crowns Claude-policy, end | vs Opus | vs Sonnet | vs Fable | vs Haiku |
+  |---|---|---|---|---|---|---|---|
+  | 1 | xbow vs xbow | 0 | 1-0, regulation | loss | loss | draw | win |
+  | 2 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win | win | win | win |
+  | 3 | xbow vs hog26 | 0 | 0-0, tiebreak (6000) | draw | draw | draw | win |
+  | 4 | royal_hogs vs hog26 | 0 | 0-1, regulation | win | win | win | win |
+  | 5 | xbow vs xbow | 1 | 0-1, regulation | win | loss | loss | win |
+  | 6 | royal_hogs vs royal_hogs | 1 | 0-1, regulation | win | win | win | win |
+  | 7 | xbow vs giant | 1 | 0-1, regulation | win | win | draw | win |
+  | 8 | royal_hogs vs giant | 1 | 0-2, regulation | win | win | win | win |
+  | 9 | xbow vs xbow | 0 | 0-1, regulation | win | draw | win | draw |
+  | 10 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win | win | win | win |
+
+  **Policy vs Opus 5.5: 8 W, 1 D, 1 L, score 0.85** (Wilson about [0.54, 0.96]); Sonnet 0.70, Fable 0.75, Haiku 0.95
+  (games 1-10). All 40 games 1-10: 29 W 7 D 4 L, 0.81. Royal Hogs: 20 of 20 policy wins across the four models.
+  Opus plays a card on 33% of its calls (396 of 1,213; Sonnet 31%, Fable 36%, Haiku 72%). Game 3 (xbow vs hog26) is a
+  0-0 draw for Opus, Sonnet and Fable. Opus games 11-20 not started.
+- 2026-11-14 11:00: **Claude games, Sonnet 5.5, games 11-20 done** (job 23119369 COMPLETED 10:55 after 2:00:28, in
+  parallel with Opus 1-10 until 10:47; 1,250 CLI calls, 0 failed, 0 retries; 0 parse errors; 21 illegal plays; mean
+  5.2 s per call; list-price estimate $11.58). Policy's result per game (draw rule):
+
+  | game | Claude deck vs policy deck | Claude team | Sonnet: crowns Claude-policy, end | policy vs Sonnet |
+  |---|---|---|---|---|
+  | 11 | xbow vs bait | 0 | 0-1, regulation | win |
+  | 12 | royal_hogs vs bait | 0 | 0-1, regulation | win |
+  | 13 | xbow vs xbow | 1 | 0-0, tiebreak (6000) | draw |
+  | 14 | royal_hogs vs royal_hogs | 1 | 0-3, King destroyed at tick 2,164 | win |
+  | 15 | xbow vs golem | 1 | 0-1, regulation | win |
+  | 16 | royal_hogs vs golem | 1 | 1-3, King destroyed at tick 1,065 | win |
+  | 17 | xbow vs xbow | 0 | 0-1, regulation | win |
+  | 18 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win |
+  | 19 | xbow vs lavaloon | 0 | 0-0, tiebreak (6000) | draw |
+  | 20 | royal_hogs vs lavaloon | 0 | 0-1, regulation | win |
+
+  **Games 11-20: 8 W, 2 D, 0 L (0.90, Wilson about [0.60, 0.98]). Sonnet games 1-20: 14 W, 4 D, 2 L, score 0.80
+  ([0.58, 0.92])**; 2,772 calls, 32 illegal plays, $25.95 in all. Game 16: crowns 1-1 at tick 900 (45 s); Sonnet's
+  King went from 4,656 HP (tick 900) to destroyed at tick 1,065 (`frames.jsonl.gz`). Royal Hogs: 25 of 25 policy wins
+  over all models so far. All 50 games so far (Fable 10, Haiku 10, Sonnet 20, Opus 10): 37 W 9 D 4 L, 0.83.
+  Remaining of the 80: Fable 11-20, Haiku 11-20, Opus 11-20.
+- 2026-11-14 14:41: **Claude games, Fable 5.2 games 11-20 and Haiku 5.5 games 11-20 started, in parallel** (user,
+  2026-11-14: "Run fable 11-20 / Also run haiku 11-20 IN PARALLEL"). One-call checks (login node, 14:39, the relay's
+  flags, effort low, Sonnet game 10's turn 5): `claude-fable-5-2` (6.2 s, `PLAY 1 AT 13,19`) and `claude-haiku-5-5`
+  (6.3 s, `PLAY 2 AT 11,21`) answer, modelUsage naming each model. Env files `claude-fable-5-2/job_games11-20.env`
+  (= `job_games4-10.env` except the first comment line and `--max-games 10`) and `claude-haiku-5-5/job_games11-20.env`
+  (= its `job.env` except comments); both resume from `llm/state.json` with games 1-10 done. Jobs 23146536
+  (pr-cg-fable52, cs642) and 23146538 (pr-cg-haiku55, cs661), 6 h limit each, running at 14:40; both game 11s have
+  Sonnet game 11's seed, decks and seat. Counted with the draw rule.
+- 2026-11-14 15:38: **Claude games, Haiku 5.5, games 11-20 done** (job 23146538 COMPLETED 15:37 after 0:56:58, in
+  parallel with Fable 11-20; 638 CLI calls, 0 failed, 0 retries; 0 parse errors; 0 illegal plays; mean 4.6 s per
+  call; Haiku plays a card on 70% of its calls (448 of 638); list-price estimate $0.38). Policy's result per game
+  (draw rule):
+
+  | game | Claude deck vs policy deck | Claude team | Haiku: crowns Claude-policy, end | policy vs Haiku |
+  |---|---|---|---|---|
+  | 11 | xbow vs bait | 0 | 0-1, regulation | win |
+  | 12 | royal_hogs vs bait | 0 | 0-1, regulation | win |
+  | 13 | xbow vs xbow | 1 | 0-1, overtime crown at tick 4,597 | win |
+  | 14 | royal_hogs vs royal_hogs | 1 | 0-1, regulation | win |
+  | 15 | xbow vs golem | 1 | 1-3, King destroyed at tick 1,743 | win |
+  | 16 | royal_hogs vs golem | 1 | 0-1, regulation | win |
+  | 17 | xbow vs xbow | 0 | 0-0, tiebreak (6000) | draw |
+  | 18 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win |
+  | 19 | xbow vs lavaloon | 0 | 1-2, regulation | win |
+  | 20 | royal_hogs vs lavaloon | 0 | 0-1, regulation | win |
+
+  **Games 11-20: 9 W, 1 D, 0 L (0.95, Wilson about [0.66, 0.99]). Haiku games 1-20: 18 W, 2 D, 0 L, score 0.95
+  ([0.76, 0.99])**; $0.75 in all. Royal Hogs: 30 of 30 policy wins over all models so far. Completed model-sets so far
+  (Fable 1-10, Haiku 1-20, Sonnet 1-20, Opus 1-10; 60 games): 46 W 10 D 4 L, 0.85 ([0.74, 0.92]). Fable 11-20 still
+  running (job 23146536): games 11-13 done at 15:37 (11: 0-0 tiebreak, draw; 12: 0-2, policy win; 13: 1-0 overtime,
+  **Fable win**, xbow mirror). All 5 Claude wins so far are X-Bow mirrors.
+- 2026-11-14 17:33: **Claude games, Fable 5.2, games 11-20 done** (job 23146536 COMPLETED 17:31 after 2:51:33, in
+  parallel with Haiku 11-20 until 15:37; 1,448 CLI calls, 0 failed, 0 retries; 0 parse errors; 0 illegal plays; mean
+  6.5 s per call, max 16.1 s; Fable plays a card on 35% of its calls (510 of 1,448); list-price estimate $51.52;
+  Fable 1-20 $101.72). Policy's result per game (draw rule; crown ticks and tower HP from `frames.jsonl.gz`):
+
+  | game | Claude deck vs policy deck | Claude team | Fable: crowns Claude-policy, end | policy vs Fable | engine HP tiebreak |
+  |---|---|---|---|---|---|
+  | 11 | xbow vs bait | 0 | 0-0, tiebreak (6000) | draw | policy |
+  | 12 | royal_hogs vs bait | 0 | 0-2, regulation | win | - |
+  | 13 | xbow vs xbow | 1 | 1-0, Fable crown in overtime at tick 4,423 | **loss** | - |
+  | 14 | royal_hogs vs royal_hogs | 1 | 0-1, regulation | win | - |
+  | 15 | xbow vs golem | 1 | 1-1 (crowns at ticks 1,533 and 1,558), tiebreak (6000) | draw | policy |
+  | 16 | royal_hogs vs golem | 1 | 1-3, King destroyed at tick 1,007 | win | - |
+  | 17 | xbow vs xbow | 0 | 0-0, tiebreak (6000) | draw | Fable |
+  | 18 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win | - |
+  | 19 | xbow vs lavaloon | 0 | 1-0, Fable crown in overtime at tick 5,779 | **loss** | - |
+  | 20 | royal_hogs vs lavaloon | 0 | 1-0, Fable crown in overtime at tick 4,201 | **loss** | - |
+
+  **Games 11-20: 4 W, 3 D, 3 L (0.55, Wilson about [0.27, 0.80]). Fable games 1-20: 10 W, 6 D, 4 L, score 0.65
+  ([0.43, 0.82])**, the lowest of the four models so far. In games 13, 19 and 20 the tower Fable took in overtime was
+  already low at the end of regulation (tick 3600: 1,731, 987 and 830 HP of 3,052). Game 20 is the first Claude win
+  with Royal Hogs (Royal Hogs now 34 W 0 D 1 L for the policy) and games 19-20 are the first Claude wins outside an
+  X-Bow mirror. All 7 Claude wins so far are 1-0. **70 of 80 games: 50 W 13 D 7 L, 0.81 ([0.70, 0.88])**: Fable 0.65
+  (20), Sonnet 0.80 (20), Opus 0.85 (10), Haiku 0.95 (20). Remaining: Opus 11-20, only when the user says.
+- 2026-11-14 18:21: **Claude games, Opus 5.5 games 11-20 started** (user, 2026-11-14: "Do the last opus games (10)").
+  One-call check (login node, 18:19, the relay's flags, effort low, Sonnet game 10's turn 5): `claude-opus-5-5`
+  answers in 7.7 s (`WAIT`), modelUsage naming the model. Env file `claude-opus-5-5/job_games11-20.env` (= its
+  `job.env` except comment lines 1 and 3); resumes from `llm/state.json` with games 1-10 done. Job 23173061
+  (pr-cg-opus55, cs607), 6 h limit, running at 18:20, alone (no other pr-cg job). Game 11 has Sonnet game 11's seed
+  (424444787), decks (xbow vs bait) and seat (team 0); policy step 10,000,007,168. Counted with the draw rule. Last 10
+  of the 80.
+- 2026-11-14 20:00: **Claude games 21-25 for all four models started, in parallel** (user, 2026-11-14: "Play 5 more OF
+  EACH - parallely !"). Games 21-25 continue `game_config(k)` and seed = crc32("S4_A_s1:k") unchanged: 21 xbow mirror
+  (team 1), 22 royal_hogs mirror (team 1), 23 xbow vs miner_poison (team 1), 24 royal_hogs vs miner_poison (team 1),
+  25 xbow mirror (team 0). `hpc/llm_game.py` schedules total // LLM_EVERY games, so the new env files
+  (`job_games21-25.env`) set LLM_EVERY 400M (25 games; every target k * 400M <= 10B picks model_610352.pt) and
+  `--max-games 5`; nothing else changed. Fable, Sonnet and Haiku play in their own folders (llm/DONE renamed
+  llm/DONE_games1-20 so the job runs). Opus games 11-20 (job 23173061) were still using `claude-opus-5-5/`, and two
+  jobs must not share a state.json, so Opus 21-25 play in a new folder `claude-opus-5-5_g21-25/` (config.json copy,
+  model link sha256 46c62cddee6a, llm/state.json marking games 1-20 'skipped' = played in `claude-opus-5-5/`).
+  One-call check of `claude-sonnet-5-5` at 19:58 (7.1 s, `WAIT`; Fable and Haiku checked 14:39, Opus 18:19). Jobs
+  23183973 (pr-cg-fable52, cs612), 23183974 (pr-cg-sonnet55, cs648), 23183975 (pr-cg-haiku55, cs701), 23183979
+  (pr-cg-opus55b, cs694), 6 h limit each, running at 19:59 alongside 23173061 (five Claude streams at once). All four
+  game 21s: seed 845271216, xbow vs xbow, Claude team 1, policy step 10,000,007,168. Counted with the draw rule.
+- 2026-11-14 20:07: **Claude games, Opus 5.5, games 11-20 done: all 80 planned games are played** (job 23173061
+  COMPLETED 20:04 after 1:44:04; from 19:59 in parallel with the four games 21-25 jobs; 1,253 CLI calls, 0 failed, 0
+  retries; 0 parse errors; 4 illegal plays; mean 4.4 s per call; Opus plays a card on 31% of its calls (394 of 1,253);
+  list-price estimate $20.98; Opus 1-20 $40.81). Policy's result per game (draw rule; crowns from `frames.jsonl.gz`):
+
+  | game | Claude deck vs policy deck | Claude team | Opus: crowns Claude-policy, end | policy vs Opus |
+  |---|---|---|---|---|
+  | 11 | xbow vs bait | 0 | 0-1, overtime crown at tick 4,311 | win |
+  | 12 | royal_hogs vs bait | 0 | 1-2 (policy 709, Opus 2,616, policy 2,943), regulation | win |
+  | 13 | xbow vs xbow | 1 | 1-0, Opus crown in overtime at tick 4,961 | **loss** |
+  | 14 | royal_hogs vs royal_hogs | 1 | 0-1, regulation | win |
+  | 15 | xbow vs golem | 1 | 0-1, regulation | win |
+  | 16 | royal_hogs vs golem | 1 | 1-3, King destroyed at tick 883 | win |
+  | 17 | xbow vs xbow | 0 | 1-0, Opus crown at tick 1,349, regulation | **loss** |
+  | 18 | royal_hogs vs royal_hogs | 0 | 0-1, regulation | win |
+  | 19 | xbow vs lavaloon | 0 | 0-0, tiebreak (6000; engine HP tiebreak: policy) | draw |
+  | 20 | royal_hogs vs lavaloon | 0 | 0-2, regulation | win |
+
+  **Games 11-20: 7 W, 1 D, 2 L (0.75, Wilson about [0.44, 0.92]). Opus games 1-20: 15 W, 2 D, 3 L, score 0.80
+  ([0.58, 0.92]).** **All 80 games (20 per model): 57 W 14 D 9 L, 0.80 ([0.70, 0.87])**: Fable 0.65 (10-6-4), Opus
+  0.80 (15-2-3), Sonnet 0.80 (14-4-2), Haiku 0.95 (18-2-0). Policy result by game, columns Fable / Opus / Sonnet / Haiku:
+
+  | game | decks | F | O | S | H | | game | decks | F | O | S | H |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | 1 | xbow mirror | D | L | L | W | | 11 | xbow vs bait | D | W | W | W |
+  | 2 | royal_hogs mirror | W | W | W | W | | 12 | royal_hogs vs bait | W | W | W | W |
+  | 3 | xbow vs hog26 | D | D | D | W | | 13 | xbow mirror | L | L | D | W |
+  | 4 | royal_hogs vs hog26 | W | W | W | W | | 14 | royal_hogs mirror | W | W | W | W |
+  | 5 | xbow mirror | L | W | L | W | | 15 | xbow vs golem | D | W | W | W |
+  | 6 | royal_hogs mirror | W | W | W | W | | 16 | royal_hogs vs golem | W | W | W | W |
+  | 7 | xbow vs giant | D | W | W | W | | 17 | xbow mirror | D | L | W | D |
+  | 8 | royal_hogs vs giant | W | W | W | W | | 18 | royal_hogs mirror | W | W | W | W |
+  | 9 | xbow mirror | W | W | D | D | | 19 | xbow vs lavaloon | L | D | D | W |
+  | 10 | royal_hogs mirror | W | W | W | W | | 20 | royal_hogs vs lavaloon | L | W | W | W |
+
+  Royal Hogs: 39 W 0 D 1 L for the policy (the loss: Fable game 20). X-Bow: 18 W 14 D 8 L. All 9 Claude wins are 1-0;
+  7 of the 9 are X-Bow mirrors. Games 21-25 of all four models are running (entry 19:59).
+- 2026-11-14 21:18: **Claude games 21-25 done for all four models: 100 games in all** (jobs 23183973 Fable COMPLETED
+  1:09:41, 23183974 Sonnet 1:16:29, 23183975 Haiku 0:40:29, 23183979 Opus 1:04:41; last ended 21:15; five Claude
+  streams at once until 20:04, four after). Calls: Fable 654, Sonnet 799, Haiku 413, Opus 723; **0 failed, 0 retries**
+  in all four; 0 parse errors; illegal plays Fable 0, Opus 2, Sonnet 14, Haiku 0. List-price estimates: Fable $22.78,
+  Opus $12.11, Sonnet $7.48, Haiku $0.25 ($42.62). Every game's meta.json: policy step 10,000,007,168, the same seed
+  per game for all four models, decision interval 20 ticks, opponent interval 10. Every llm/DONE rewritten (all 25
+  done; Opus folder: 1-20 skipped + 21-25 done). Policy's result (draw rule; Claude-policy crowns; F/O/S/H):
+
+  | game | decks (Claude team) | Fable | Opus | Sonnet | Haiku |
+  |---|---|---|---|---|---|
+  | 21 | xbow mirror (1) | 1-0 at tick 3,398: **L** | 1-1, tiebreak: D | 0-0: D | 0-0: D |
+  | 22 | royal_hogs mirror (1) | 0-1: W | 0-1: W | 0-2: W | 0-1: W |
+  | 23 | xbow vs miner_poison (1) | 0-1 overtime (5,939): W | 1-0 at 2,909: **L** | 0-1: W | 0-0: D |
+  | 24 | royal_hogs vs miner_poison (1) | 1-0 at 2,877: **L** | 1-0 at 2,041: **L** | 0-1: W | 0-1: W |
+  | 25 | xbow mirror (0) | 1-0 at 3,280: **L** | 1-0 overtime (4,568): **L** | 0-0: D | 0-1: W |
+
+  Games 21-25: Fable 2-0-3 (0.40), Opus 1-1-3 (0.30), Sonnet 3-2-0 (0.80), Haiku 3-2-0 (0.80); all 20: 9 W 5 D 6 L,
+  **0.575** (Wilson [0.36, 0.76]), below games 1-20 (0.80). Part of the gap is the mix: 2 of these 5 games are X-Bow
+  mirrors (5 of 20 before), the policy's weakest setup (games 1-20: 0.50; here 0.375); with the games 1-20 rate of each
+  setup type the batch would expect about 0.74, inside the interval. Games 23-24 bring a deck the policy had not used
+  here, miner_poison: 4-1-3 (0.56, n=8). Engine HP tiebreak differs from the draw rule in Opus 21 and Sonnet 21
+  (engine: Claude) and Haiku 21, 23, Sonnet 25 (engine: policy).
+
+  **All 100 games (25 per model): 66 W 19 D 15 L, 0.755 (Wilson [0.66, 0.83])**: Fable 12-6-7 **0.60** ([0.41, 0.77]),
+  Opus 16-3-6 0.70 ([0.50, 0.84]), Sonnet 17-6-2 0.80 ([0.61, 0.91]), Haiku 21-4-0 0.92 ([0.75, 0.98]). By setup:
+  Royal Hogs mirror 24-0-0 (1.00), Royal Hogs vs other 21-0-3 (0.875), X-Bow vs other 13-9-2 (0.73), X-Bow mirror
+  8-10-10 (0.46). All 15 Claude wins are 1-0 (Fable 7, Opus 6, Sonnet 2, Haiku 0); 10 are X-Bow mirrors.
+- 2026-11-14 22:34: **Claude-game results added to the README (release tree, not pushed yet) and to the play site**
+  (user, 2026-11-14: "add these results and a plot for the same in the README ... and also add this to the website
+  ... a separate section of games against LLMs and show the statistics").
+  - **Figure:** `docs/figures/make_figures.py --only claude_games` (release tree; new function
+    `fig_claude_games`) writes `docs/figures/claude_games.png` and `claude_games.json` (per-game table, no
+    costs, no Claude text). It asserts that every model played the same 25 games with the same seed, decks and
+    side, and one policy step (10,000,007,168); the doc check of the 100-game W-D-L and score: 4 numbers match.
+    Claude's score: Fable 0.40 [0.23, 0.59], Opus 0.30 [0.16, 0.50], Sonnet 0.20 [0.09, 0.39], Haiku 0.08
+    [0.02, 0.25], all 0.245 [0.17, 0.34]; by setup X-Bow mirror 0.54 (28), X-Bow vs other 0.27 (24), Royal Hogs
+    mirror 0.00 (24), Royal Hogs vs other 0.125 (24). Colours: smallest CVD ΔE 21.9, normal 26.2.
+  - **README:** results item 7 (table, figure, three findings), "In short" finding 6, a Limitations bullet;
+    FIGURES.md entry; release `hpc/llm.sbatch` gets LLM_RUN_DIR (as used for these games); release
+    STAGE4_SELECTION.md synced with this file.
+  - **Play site:** new lobby panel "Games against language models" (`scripts/play_human.{py,html}`, same change in
+    release `play/play_server.py`, `play/play_page.html`): `GET /api/llm_games`, `GET /api/llm_replay` (GIFs
+    named in the JSON and inside `--llm-replays`, default `<data-dir>/../claude_games/S4_A_s1_10B`). Checked on a
+    private localhost copy (bad model / game / traversal / no token refused; headless Chromium at 1100 px and
+    390 px, no console errors). Tests: live `tests/builder/test_play_human.py` 28 passed; release
+    `test_play_site.py` + `test_play_semantics.py` 39 passed. Live site (job 22719628) had 0 players, restarted
+    with `hpc/play_restart.sh` at about 22:30 (same link): 100 games, 100 replays, a 6.0 MB replay served through
+    the tunnel. The queued successor 23027985 starts from the same checkout. Backup of the old page and server:
+    `/scratch/$USER/pufferroyale/tmp_site_backup_20261114_222645/`.

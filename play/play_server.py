@@ -102,6 +102,8 @@ MAX_SPECTATORS = 20            # people watching one live match at most
 MAX_SPECTATE = 60              # spectator sessions at most (all matches)
 MAX_BODY = 16384               # bytes per POST body
 HTML_FILE = os.path.join(ROOT, "play", "play_page.html")
+LLM_GAMES_FILE = os.path.join(ROOT, "docs", "figures", "claude_games.json")   # Claude vs this policy (docs/figures/make_figures.py)
+LLM_SLUG_RE = re.compile(r"^claude-[a-z]+-[0-9]+-[0-9]+$")
 NAME_BAD = re.compile(r"[^A-Za-z0-9 _\-.']")
 HOST_RE = re.compile(r"^[A-Za-z0-9.\-]{1,253}(:[0-9]{1,5})?$")
 ID_RE = re.compile(r"^[A-Za-z0-9_\-]{8,40}$")
@@ -1172,6 +1174,64 @@ class Replay(Board):
 
 
 # ====================================================================================== sessions
+class LLMGames:
+    """The Claude-vs-policy games of docs/figures/claude_games.json, for the lobby's "Games against language
+    models", and their GIF replays from `replay_dir` (on the cluster: runs/claude_games/S4_A_s1_10B; elsewhere none,
+    and the page shows the results without replays). The file is re-read when it changes. Only GIFs that the JSON
+    names and that lie inside `replay_dir` are ever served."""
+
+    def __init__(self, path, replay_dir):
+        self.path, self.replay_dir = path, replay_dir
+        self.lock = threading.Lock()
+        self.mtime, self.data, self.paths = None, None, {}
+
+    def _load(self):
+        try:
+            mt = os.path.getmtime(self.path)
+        except OSError:
+            return None
+        with self.lock:
+            if mt != self.mtime:
+                try:
+                    with open(self.path, encoding="utf-8") as f:
+                        d = json.load(f)
+                except (OSError, ValueError):
+                    return self.data
+                root = None
+                if self.replay_dir and os.path.isdir(self.replay_dir):
+                    root = os.path.realpath(self.replay_dir)
+                paths, games = {}, []
+                for g in d.get("games", []):
+                    rel, full = str(g.get("replay") or ""), None
+                    if root and rel.endswith(".gif"):
+                        p = os.path.realpath(os.path.join(root, rel))
+                        if p.startswith(root + os.sep) and os.path.isfile(p):
+                            full = p
+                    if full:
+                        paths[(str(g.get("model")), int(g.get("k", 0)))] = full
+                    games.append(dict({k: v for k, v in g.items() if k != "replay"}, replay=full is not None))
+                self.data = dict({k: v for k, v in d.items() if k != "games"}, games=games)
+                self.paths, self.mtime = paths, mt
+            return self.data
+
+    def public(self):
+        return self._load() or {"games": []}
+
+    def gif(self, model, k):
+        if not LLM_SLUG_RE.match(model or ""):
+            raise ValueError("bad model")
+        try:
+            k = int(k)
+        except ValueError:
+            raise ValueError("bad game number") from None
+        self._load()
+        path = self.paths.get((model, k))
+        if path is None:
+            raise ValueError("no replay for this game")
+        with open(path, "rb") as f:
+            return f.read()
+
+
 class Session:
     def __init__(self, player_id, name, owner, kind):
         self.sid = secrets.token_urlsafe(16)
@@ -1200,6 +1260,7 @@ class Server:
         else:
             self.player, self.checkpoint_sha, self.label = player, "0" * 64, args.label or "test policy"
         self.store = Store(args.data_dir)
+        self.llm_games = LLMGames(LLM_GAMES_FILE, getattr(args, "llm_replays", None))
         self.claude_on = bool(args.claude_relay_dir)
         self.voice_dir = getattr(args, "voice_dir", None)
         if self.voice_dir:
@@ -1526,6 +1587,11 @@ def make_handler(server, token, owner_key, html):
                     return self._send(200, dict(server.store.leaderboard(), status=server.status(), live=server.live_list()))
                 if u.path == "/api/history":
                     return self._send(200, {"matches": server.store.history((q.get("player_id") or [""])[0])})
+                if u.path == "/api/llm_games":
+                    return self._send(200, server.llm_games.public())
+                if u.path == "/api/llm_replay":
+                    return self._send(200, server.llm_games.gif((q.get("model") or [""])[0], (q.get("k") or [""])[0]),
+                                      "image/gif")
                 if u.path == "/api/ws":
                     return self._ws(server.session((q.get("sid") or [""])[0]))
                 if u.path == "/api/state":
@@ -1846,6 +1912,9 @@ def main():
     ap.add_argument("--owner-key-file", default=None, help="the owner key (?owner=...): unlocks the Claude toggles")
     ap.add_argument("--data-dir", default=os.path.join(os.environ.get("DATA_DIR", os.path.join(ROOT, "experiments")),
                                                        "human_play"), help="players.json and matches/")
+    ap.add_argument("--llm-replays", default=None,
+                    help="folder of the Claude-game GIFs that docs/figures/claude_games.json names (default: "
+                         "<data-dir>/../claude_games/S4_A_s1_10B when it exists); none = results without replays")
     ap.add_argument("--max-players", type=int, default=5, help="matches at once; later players wait in line")
     ap.add_argument("--max-replays", type=int, default=5, help="replays at once")
     ap.add_argument("--claude-relay-dir", default=None,
@@ -1857,6 +1926,9 @@ def main():
                     "the page uses the browser's own speech")
     ap.add_argument("--threads", type=int, default=2, help="torch CPU threads (torch's default is far slower here)")
     args = ap.parse_args()
+    if args.llm_replays is None:
+        guess = os.path.join(os.path.dirname(os.path.abspath(args.data_dir)), "claude_games", "S4_A_s1_10B")
+        args.llm_replays = guess if os.path.isdir(guess) else None
 
     token = read_secret(args.token_file, "site token") if args.token_file else secrets.token_urlsafe(16)
     owner_key = read_secret(args.owner_key_file, "owner key") if args.owner_key_file else None
@@ -1869,6 +1941,9 @@ def main():
     print(f"[play] opponent: {server.label} (sha256 {server.checkpoint_sha[:12]}), "
           f"{'greedy' if args.greedy else 'sampled'} actions; {args.max_players} seats; records in {args.data_dir}; "
           f"Claude {'via ' + args.claude_relay_dir + ' (owner only)' if server.claude_on else 'off'}", flush=True)
+    lg = server.llm_games.public()
+    print(f"[play] games against language models: {len(lg['games'])} in {LLM_GAMES_FILE}, "
+          f"{sum(g['replay'] for g in lg['games'])} with replays ({args.llm_replays or 'no replay folder'})", flush=True)
     if not args.token_file:
         print(f"[play] open http://{shown}:{args.port}/?token={token}", flush=True)
     else:

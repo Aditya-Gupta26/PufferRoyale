@@ -130,6 +130,13 @@
   .modal .box { background: var(--panel); border-radius: 14px; padding: 16px 18px; width: min(420px, 92vw); text-align: center; }
   .modal .big { font-size: 30px; font-weight: 800; margin: 4px 0 6px; }
   .modal .row { justify-content: center; margin-top: 14px; }
+  .modal .box.wide { width: min(560px, 96vw); padding: 12px; }
+  .strip { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .strip i { width: 9px; height: 15px; border-radius: 2px; display: inline-block; background: #4a5663; }
+  .strip i.w { background: #6fd39b; } .strip i.l { background: #ff8a8d; } .strip i.d { background: #8b98a5; }
+  .strip i.on { outline: 2px solid var(--gold); outline-offset: 1px; }
+  @media (max-width: 600px) { .llm-wide { display: none; } .strip i { width: 8px; } }
+  @media (min-width: 601px) { .llm-narrow { display: none; } }
   @media (max-width: 480px) { .card .ic { font-size: 24px; line-height: 28px; } .card { min-height: 66px; } #game { padding: 4px; } }
   /* ---------- phone: the board takes the screen; the controls live in a Menu sheet ---------- */
   #hud, #hudcap { display: none; }
@@ -210,6 +217,15 @@
       <div class="tabs"><button id="tabrecent" class="on">Everyone</button><button id="tabmine">Mine</button></div>
       <table><thead><tr><th>Player</th><th>Result</th><th>Decks</th><th></th></tr></thead><tbody id="recent"></tbody></table></div>
   </div>
+  <div class="card-panel" id="llmpanel" style="display:none"><h2>Games against language models <span class="muted small" id="llmsub"></span></h2>
+    <div class="small muted" id="llmnote" style="margin-bottom:8px"></div>
+    <table><thead><tr><th>Claude model</th><th class="num llm-wide">Games</th><th class="num">W-D-L</th><th class="num">Score</th><th class="num">95% range</th><th class="llm-wide">Every game, in order</th></tr></thead>
+      <tbody id="llmsum"></tbody></table>
+    <div class="muted small" id="llmtot" style="margin-top:6px"></div>
+    <div class="row small" id="llmsetups" style="margin:10px 0"></div>
+    <div class="tabs" id="llmtabs"></div>
+    <table><thead><tr><th class="num">#</th><th>Decks (Claude vs policy)</th><th>Claude</th><th class="llm-wide">Ended</th><th></th></tr></thead><tbody id="llmgames"></tbody></table>
+  </div>
   <footer>Unofficial research simulator; not affiliated with or endorsed by Supercell. Card names refer to the simulated mechanics only; no game art is used.</footer>
 </div>
 
@@ -288,6 +304,13 @@
   <div class="big" id="pinbig" style="letter-spacing:6px">0000</div>
   <div class="small" id="pinnote">Write it down. With your name, it signs you in on any device. It is shown only this once.</div>
   <div class="row"><button class="primary" id="pinok">I saved it</button></div>
+</div></div>
+
+<div class="modal" id="llmmodal"><div class="box wide">
+  <div class="row" style="justify-content:space-between;margin:0 0 8px"><b id="llmtitle" style="text-align:left"></b><button id="llmclose">Close</button></div>
+  <div class="small muted" id="llmload">Loading the replay (a few MB)…</div>
+  <img id="llmimg" alt="Replay of the game" style="max-width:100%;max-height:78vh;display:none;margin:0 auto">
+  <div class="small muted" id="llmcap" style="margin-top:6px"></div>
 </div></div>
 
 <div class="modal" id="result"><div class="box">
@@ -398,6 +421,7 @@ async function boot() {
   setDeckTab(deckChoice === "custom" ? "build" : "preset");
   renderDeck();
   refreshBoard();
+  loadLLM();
   setInterval(() => { if ($("lobby").classList.contains("on")) refreshBoard(); }, 5000);
   show("lobby");
 }
@@ -511,6 +535,80 @@ function resultCell(s) {
   else { td.textContent = (s.result > 0 ? "won " : s.result < 0 ? "lost " : "draw ") + s.crowns[0] + "–" + s.crowns[1]; td.className = s.result > 0 ? "res-w" : s.result < 0 ? "res-l" : "res-d"; }
   if (!s.ranked) td.appendChild(el("span", "muted small", s.autopilot_used ? " · autopilot" : s.advisor_used ? " · hint" : s.min_speed < 1 ? " · " + s.min_speed + "×" : ""));
   return td;
+}
+// ----------------------------------------------------------------- games against language models (read once)
+let LLM = null, llmModel = null;
+const LLM_DECK = {xbow: "X-Bow", royal_hogs: "Royal Hogs"};
+const LLM_END = {REGULATION_CROWNS: "end of regulation", OVERTIME_CROWNS: "tower in overtime", KING: "King Tower destroyed",
+                 TIEBREAK: "end of overtime"};
+const pct = x => (100 * x).toFixed(0) + "%";
+const llmTime = t => { const s = Math.floor(t / 20); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };   // game time elapsed
+function llmDecks(g) { return (LLM_DECK[g.claude_deck] || g.claude_deck) + (g.mirror ? " mirror" : " vs " + (LLM_DECK[g.policy_deck] || g.policy_deck)); }
+function llmResult(g) {
+  const td = el("td", g.result === "W" ? "res-w" : g.result === "L" ? "res-l" : "res-d",
+                (g.result === "W" ? "won " : g.result === "L" ? "lost " : "draw ") + g.claude_crowns + "–" + g.policy_crowns);
+  return td;
+}
+function llmWatch(g) {
+  const name = (LLM.models[g.model] || {}).name || g.model;
+  $("llmtitle").textContent = name + " · game " + g.k + " · " + llmDecks(g);
+  $("llmcap").textContent = "Claude " + (g.result === "W" ? "won " : g.result === "L" ? "lost " : "drew ") + g.claude_crowns + "–" + g.policy_crowns +
+    " (" + (LLM_END[g.end_reason] || g.end_reason) + "). Claude is blue (bottom), the policy red (top); Claude's reasoning for each play is printed under the board. Real time.";
+  const img = $("llmimg"); img.style.display = "none"; $("llmload").style.display = ""; $("llmload").textContent = "Loading the replay (a few MB)…";
+  img.onload = () => { $("llmload").style.display = "none"; img.style.display = "block"; };
+  img.onerror = () => { $("llmload").textContent = "Could not load this replay."; };
+  img.src = withTok("/api/llm_replay?model=" + encodeURIComponent(g.model) + "&k=" + g.k);
+  $("llmmodal").style.display = "flex";
+}
+$("llmclose").onclick = () => { $("llmmodal").style.display = "none"; $("llmimg").removeAttribute("src"); };
+function llmShowModel(m) {
+  llmModel = m;
+  for (const b of $("llmtabs").children) b.classList.toggle("on", b.dataset.m === m);
+  const tb = $("llmgames"); tb.innerHTML = "";
+  for (const g of LLM.games.filter(x => x.model === m)) {
+    const tr = el("tr"); tr.appendChild(el("td", "num", String(g.k)));
+    tr.appendChild(el("td", "small", llmDecks(g))); tr.appendChild(llmResult(g));
+    tr.appendChild(el("td", "small muted llm-wide", (LLM_END[g.end_reason] || g.end_reason) + " · " + llmTime(g.end_tick)));
+    const td = el("td");
+    if (g.replay) { const b = el("button", "", "Watch"); b.onclick = () => llmWatch(g); td.appendChild(b); }
+    tr.appendChild(td); tb.appendChild(tr);
+  }
+}
+function llmStrip(m) {                     // one small square per game, in game order; click = watch the replay
+  const st = el("span", "strip");
+  for (const g of LLM.games.filter(x => x.model === m)) {
+    const i = el("i", g.result === "W" ? "w" : g.result === "L" ? "l" : "d");
+    i.title = "Game " + g.k + ": " + llmDecks(g) + ", Claude " + (g.result === "W" ? "won " : g.result === "L" ? "lost " : "drew ") + g.claude_crowns + "–" + g.policy_crowns;
+    if (g.replay) { i.style.cursor = "pointer"; i.onclick = () => { llmShowModel(m); llmWatch(g); }; }
+    st.appendChild(i);
+  }
+  return st;
+}
+async function loadLLM() {
+  try { LLM = await getj("/api/llm_games"); } catch (e) { return; }
+  if (!LLM || !(LLM.games || []).length || !LLM.models) return;
+  const ms = Object.keys(LLM.models), t = LLM.total || {};
+  const per = LLM.models[ms[0]].games;
+  $("llmsub").textContent = "(Claude played this policy: " + per + " games per model, the same games for every model)";
+  $("llmnote").textContent = "Claude reads a text description of the board and answers once per game second; the game waits for each answer. " +
+    "The policy acts every half second. Score = Claude's wins + ½ draws per game, as on the leaderboard; a draw = equal crowns at the end.";
+  const sb = $("llmsum"); sb.innerHTML = "";
+  for (const m of ms) {
+    const r = LLM.models[m], tr = el("tr");
+    tr.appendChild(el("td", "", r.name)); tr.appendChild(el("td", "num llm-wide", String(r.games)));
+    tr.appendChild(el("td", "num", r.w + "-" + r.d + "-" + r.l)); tr.appendChild(el("td", "num", pct(r.score)));
+    tr.appendChild(el("td", "num small muted", pct(r.ci[0]) + "–" + pct(r.ci[1])));
+    const td = el("td", "llm-wide"); td.appendChild(llmStrip(m)); tr.appendChild(td); sb.appendChild(tr);
+    const tr2 = el("tr", "llm-narrow"), td2 = el("td"); td2.colSpan = 4; td2.appendChild(llmStrip(m)); tr2.appendChild(td2); sb.appendChild(tr2);
+  }
+  if (t.games) $("llmtot").textContent = "All " + t.games + " games: Claude " + t.w + " wins, " + t.d + " draws, " + t.l + " losses (" + pct(t.score) + ", 95% range " + pct(t.ci[0]) + "–" + pct(t.ci[1]) + "). Green = Claude won, red = the policy won, gray = draw.";
+  const su = $("llmsetups"); su.innerHTML = "";
+  su.appendChild(el("span", "muted", "Claude's score by setup:"));
+  for (const x of (LLM.setups || [])) su.appendChild(el("span", "chip", (LLM_DECK[x.claude_deck] || x.claude_deck) + (x.mirror ? " mirror" : " vs other decks") + ": " + pct(x.score) + " (" + x.games + ")"));
+  const tabs = $("llmtabs"); tabs.innerHTML = "";
+  for (const m of ms) { const b = el("button", "", LLM.models[m].name); b.dataset.m = m; b.onclick = () => llmShowModel(m); tabs.appendChild(b); }
+  llmShowModel(ms[0]);
+  $("llmpanel").style.display = "";
 }
 async function refreshBoard() {
   try {

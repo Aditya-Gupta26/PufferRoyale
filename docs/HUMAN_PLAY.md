@@ -169,6 +169,15 @@ A quick tunnel's address changes at every site job, and a job lasts at most 2 da
   recorded in the browser.
 - **Leaderboard.** It ranks players by score against the policy, (wins + ½ draws) per match, over **ranked**
   matches only: finished, 1× speed throughout, advisor never on. Player ids are never shown (they work as the login).
+- **Games against language models** (added 2026-11-14). A lobby panel shows the 100 games four Claude models
+  played against the released policy (25 each, the same games for every model): per model W-D-L, Claude's score
+  with its 95% range and one square per game, the score per setup, and a game list per model.
+  - **Data:** `docs/figures/claude_games.json`, written by `docs/figures/make_figures.py --only claude_games`
+    (no costs and no Claude text), served at `GET /api/llm_games`. The server re-reads it when the file changes.
+  - **Replays:** "Watch" (or a square) opens the game's GIF from `GET /api/llm_replay?model=<id>&k=<game>`. Only
+    GIFs that the JSON names and that lie inside `--llm-replays` are served (default:
+    `<data-dir>/../claude_games/S4_A_s1_10B` when it exists; elsewhere the panel shows results without replays).
+  - Same site token as every other request; `play/play_server.py` prints how many games and replays it found at start.
 
 ## Network and phones
 

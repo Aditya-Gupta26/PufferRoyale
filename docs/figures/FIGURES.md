@@ -6,20 +6,24 @@ All six PNGs are made by `make_figures.py` (next to this file) from result files
 ```bash
 source /scratch/$USER/pufferroyale/env.sh       # PR_ROOT, SIF
 apptainer exec --no-home --bind $PR_ROOT:$PR_ROOT $SIF python docs/figures/make_figures.py
-# one figure only:  ... make_figures.py --only human_play
+# one figure only:  ... make_figures.py --only human_play claude_games
 ```
 
 It runs in about 10 s in one process on a login node, using the image's matplotlib 3.11.2 and numpy.
 At the end it prints a check of every number the figures share with `docs/STAGE4_SELECTION.md`.
 
-**Last run (2026-11-09):** 304 numbers match, 0 mismatches, 0 tables or sentences not found
+**Last run (2026-11-14):** 308 numbers match, 0 mismatches, 0 tables or sentences not found
 (stage 1: 108 values incl. checkpoint paths and steps; stage 2: 99; stage 3b: 8; stage 4a: 56; stage 5: 32;
 the stage-3 winner: 1).
 
 **Style.** All figures share one style:
+- Plain words: the released model is "the agent", best responses are "attackers", pool decks are "training
+  decks". Every line is labelled where possible; no text overlaps a plot (checked by eye after each change).
 - 8 in wide at 150 dpi (1200 px), on a white background.
-- Text is 11 pt or larger; the title states the takeaway.
-- Colours are Okabe-Ito. Blue `#0072B2` always means the selected policy (S4_A_s1) and its no-floor
+- No title, subtitle or footnote inside the image (user, 2026-11-14): the README caption under each figure
+  carries its context. The script still computes each figure's takeaway, what it measures and its caveats
+  from the data and prints them, so the caption can be checked. In-plot text is 10 pt or larger.
+- Colours are Okabe-Ito. Blue `#0072B2` always means the agent (S4_A_s1, the selected policy) and its no-floor
   line; vermillion `#D55E00` is the other side.
 - The card-floor arms use one orange hue that darkens as the floor grows (`#f39d5e`, `#c66000`, `#7c3c00`).
 - The colours were checked with a Python port of the dataviz validator (Machado 2009 CVD simulation, OKLab),
@@ -165,31 +169,54 @@ cost strength against the scripted bot on held-out decks; a floor of 0.05 is wit
   - Elo: control 1634, floor 0.10 1523, floor 0.05 1493, floor 0.20 1349. Nash: control 1.00.
 - **Doc check:** every value matches the doc's stage-5 table (cells, Wilson intervals, Elo, Nash) and the
   expected values given in the request.
-- **Note:** under rule 5 this round robin is only the tie-break. The deciding stage-5 BR results did not exist
-  when the figure was made, and its footnote says so; that sentence is computed from `runs/eval/br_S5a_*.json`.
+- **Note:** under rule 5 this round robin is only the tie-break. The footnote states the deciding stage-5 test:
+  the mean best-response score per copy over its 2 attackers, read from `runs/eval/br_S5a_S4L_A_s1_*_s{0,1}.json`
+  (control 0.45, floors 0.05 / 0.10 / 0.20: 0.65 / 0.51 / 0.70; the script asserts the control is lowest).
 
 ## human_play.png
 
-**Caption:** In browser play against S4_A_s1's final model (10.0B steps), humans won 3 of 20 ranked matches,
-a human score of 0.15 [0.05, 0.36]. The policy won 17, 8 of them by destroying the King Tower.
+**Caption:** In browser play against the final agent (S4_A_s1, 10.0B steps), humans won 4 of 22 ranked
+matches, a human score of 0.18 [0.07, 0.39]. The agent won 18, 9 of them by destroying the King Tower.
 
 - **Data:**
-  - `runs/human_play/matches/*.json`: 27 files, all against `league/S4_A_s1/model_610352.pt` with sampled
+  - `runs/human_play/matches/*.json`: 30 files (2026-11-14), all against `league/S4_A_s1/model_610352.pt` with sampled
     actions (greedy false).
   - Only these `summary` fields are used: started, result, ranked, abandoned, advisor_used, crowns,
     end_reason. `player_id` is used only to count distinct players.
 - **What counts as ranked:** `summary.ranked`, which means finished, 1× speed and the advisor never on
   (HUMAN_PLAY.md, "Leaderboard").
 - **Key numbers:**
-  - 20 ranked matches from 6 to 9 Nov 2026, by 4 players. The two most active players played 16 of the 20.
-  - Results: 3 human wins, 0 draws, 17 losses. Crown differences: +2, +1, +2 for the wins; −3 seven times.
-  - Not counted: 7 unranked matches (4 abandoned, 3 with the advisor on).
+  - 22 ranked matches from 6 to 9 Nov 2026, by 4 players. The two most active players played 18 of the 22.
+  - Results: 4 human wins, 0 draws, 18 losses. Crown differences: +2, +1, +2, +1 for the wins; −3 seven times.
+  - Not counted: 8 unranked matches (5 abandoned, 3 with the advisor on).
+  - The README of 2026-11-09 said 3 of 20: two ranked matches were played later that evening (22:22, 22:25).
 - **Privacy:** no name, player id or per-player result appears in the figure.
 - **Caveats:**
   - The interval treats matches as independent, although a few players played most of them.
   - The figure shows whatever is in `matches/` when the script runs, and the live site keeps adding matches.
   - These numbers are not in STAGE4_SELECTION.md. HUMAN_PLAY.md confirms that the site serves
     model_610352.pt (10.0B).
+
+---
+
+## claude_games.png
+
+**Caption:** Four Claude models each played the released agent (S4_A_s1, 10.0B steps) 25 times, in the same 25
+setups. Claude's score was 0.40 (Fable 5.2), 0.30 (Opus 5.5), 0.20 (Sonnet 5.5) and 0.08 (Haiku 5.5); 10 of
+Claude's 15 wins came in X-Bow mirrors.
+
+- **Data:** `runs/claude_games/S4_A_s1_10B/<model>[_<suffix>]/llm/state.json` and each game's `meta.json`
+  (Opus 5.5 games 21-25 sit in `claude-opus-5-5_g21-25/`, because they ran while games 11-20 used the main
+  folder). Only games with status `done` are used.
+- **Checks in the script:** every model played the same games; each game has the same seed, decks and side for
+  every model; every game used the same policy step (10,000,007,168).
+- **Draw rule:** equal crowns at the end = draw; the engine's tower-HP tiebreak (`result` in state.json) is kept
+  in the JSON as `engine_result` but not used.
+- **Also written:** `claude_games.json`, the per-game table (no costs, no Claude text), read by the play site.
+- **Colours:** vermillion = Claude won, blue = the agent won, light gray `#c4c4c4` = draw. Checked with the
+  same validator port: smallest colour-blind ΔE 21.9 (blue vs vermillion, protan), smallest normal-vision ΔE
+  26.2. The gray has low contrast on white (1.7:1), so every count is also printed (legend, W-D-L column).
+- **Caveat:** 25 games per model; the interval treats games as independent.
 
 ---
 
