@@ -74,7 +74,14 @@
   .crowns { font-size: 18px; font-weight: 700; white-space: nowrap; }
   .crowns.me { color: var(--me); } .crowns.foe { color: var(--foe); }
   #boardwrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
-  canvas { touch-action: none; border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,.45); }
+  /* Board and hand: one finger is the game's (tap, drag a card); a two-finger pinch is the browser's, so a page that
+     got zoomed in (Safari on iPhone zooms even with user-scalable=no) can always be pinched back out. Browsers
+     without the pinch-zoom value keep "none". The game screen also turns off double-tap zoom. */
+  canvas { touch-action: none; touch-action: pinch-zoom; border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,.45); }
+  body.ingame { touch-action: manipulation; }
+  body.zoomed canvas, body.zoomed .card { touch-action: manipulation; }   /* while zoomed in: pinching out works everywhere */
+  #zoomhint { position: fixed; left: 0; top: 0; transform-origin: 0 0; display: none; z-index: 30; pointer-events: none;
+    margin: 8px; background: rgba(0,0,0,.94); color: #fff; padding: 6px 12px; border-radius: 10px; font-size: 14px; font-weight: 600; white-space: nowrap; }
   #clock { position: absolute; top: 8px; right: 10px; background: rgba(0,0,0,.55); padding: 3px 9px; border-radius: 8px; font-weight: 700; font-variant-numeric: tabular-nums; pointer-events: none; }
   #banner { position: absolute; top: 44%; left: 50%; transform: translate(-50%,-50%); background: rgba(0,0,0,.6); padding: 8px 16px; border-radius: 10px; font-size: 18px; font-weight: 700; pointer-events: none; display: none; text-align: center; }
   #toast { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: rgba(20,20,20,.92); padding: 6px 12px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; white-space: nowrap; }
@@ -86,7 +93,7 @@
   .card .key { position: absolute; top: 2px; right: 6px; color: var(--muted); font-size: 11px; }
   .card .adv { position: absolute; bottom: 2px; right: 4px; background: var(--gold); color: #222; border-radius: 6px; font-size: 10px; font-weight: 800; padding: 0 4px; }
   .card.sel { border-color: #fff; background: #2b3948; }
-  .card { touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; }
+  .card { touch-action: none; touch-action: pinch-zoom; -webkit-touch-callout: none; -webkit-user-select: none; }
   .card > * { pointer-events: none; }
   .card.sending { opacity: .5; border-style: dashed; border-color: #fff; }
   .card.poor { opacity: .45; }
@@ -131,6 +138,14 @@
   .modal .big { font-size: 30px; font-weight: 800; margin: 4px 0 6px; }
   .modal .row { justify-content: center; margin-top: 14px; }
   .modal .box.wide { width: min(560px, 96vw); padding: 12px; }
+  /* welcome window (first visit: how to play, then name + PIN) */
+  .modal .box.welcome { width: min(470px, 94vw); max-height: 92vh; overflow-y: auto; text-align: left; padding: 18px 20px; }
+  .welcome h2 { margin: 0 0 6px; font-size: 20px; }
+  .welcome ol { margin: 10px 0 4px; padding-left: 20px; } .welcome li { margin: 7px 0; }
+  .welcome .wform { display: grid; gap: 8px; margin-top: 4px; } .welcome .wform input { width: 100%; }
+  .welcome .row { justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  /* phones: iOS Safari zooms into any text box under 16px when it gets focus */
+  @media (pointer: coarse) { input, select { font-size: 16px; } }
   .strip { display: inline-flex; gap: 2px; vertical-align: middle; }
   .strip i { width: 9px; height: 15px; border-radius: 2px; display: inline-block; background: #4a5663; }
   .strip i.w { background: #6fd39b; } .strip i.l { background: #ff8a8d; } .strip i.d { background: #8b98a5; }
@@ -174,7 +189,7 @@
   <div class="row" style="justify-content:space-between">
     <div><h1>PufferRoyale · play the policy</h1>
       <div class="muted small">Opponent: <span id="oplabel">…</span> · <span id="seats">…</span></div></div>
-    <div class="row"><span class="muted small" id="ownerbadge"></span></div>
+    <div class="row"><span class="muted small" id="ownerbadge"></span><button id="howto">How to play</button></div>
   </div>
   <div class="grid2">
     <div class="card-panel">
@@ -183,7 +198,7 @@
         <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="PIN" autocomplete="current-password" style="width:72px">
         <button id="savename">Continue</button></div>
       <div class="small" id="whoami" style="margin-top:6px"></div>
-      <div class="muted small" style="margin-top:4px">Name + 4-digit PIN is your login. New name: choose a PIN. Same name and PIN on any device continue your record, deck and settings. <button id="changepin" class="linkbtn" style="display:none">Change my PIN</button></div>
+      <div class="muted small" style="margin-top:4px"><span id="loginnote">Name + 4-digit PIN is your login. New name: choose a PIN. Same name and PIN on any device continue your record, deck and settings.</span> <button id="changepin" class="linkbtn" style="display:none">Change my PIN</button> <button id="signout" class="linkbtn" style="display:none">Sign out</button></div>
       <h2 style="margin-top:14px">Match</h2>
       <div class="row" style="margin-bottom:6px"><label class="small">Opponent's deck</label><select id="oppdeck"></select></div>
       <div class="row" style="margin-bottom:6px"><label class="small">Your seat</label><select id="seat">
@@ -247,7 +262,7 @@
       <span id="dot" title="connection"></span><span id="ping" class="small muted" title="time per update (round trip)"></span>
       <button id="pausebtn" title="Pause / resume (Space)">Pause</button>
       <select id="speedsel" title="Game speed"></select>
-      <button id="labelsbtn" title="Unit names on / off (L)">Aa</button>
+      <button id="labelsbtn" title="Names on / off (L)">Aa</button>
       <button id="leavebtn" title="Back to the lobby">Leave</button>
     </div>
     <div class="bar" id="replaybar" style="display:none">
@@ -294,9 +309,39 @@
   </div>
 </div>
 
+<div id="zoomhint">Zoomed in: pinch with two fingers to zoom out</div>
+
 <div id="sheet"><div class="inner"><div class="grab"></div>
   <div class="row" style="justify-content:space-between"><b>Menu</b><button id="sheetclose">Close</button></div>
   <div id="sheetbody"></div>
+</div></div>
+
+<div class="modal" id="welcome" role="dialog" aria-modal="true" aria-labelledby="wtitle"><div class="box welcome">
+  <div id="wstep1">
+    <h2 id="wtitle">Welcome! Can you beat the AI?</h2>
+    <div class="muted">A 1v1 card battle against an AI that learned the game by playing against itself.</div>
+    <ol>
+      <li><b>Win:</b> knock down the enemy towers. Each small tower is 1 crown. The big King tower at the back is 3 crowns and ends the match. A match lasts 3 minutes, with overtime if the crowns are level.</li>
+      <li><b>Play a card:</b> drag a card from your hand onto your half of the arena, or tap the card and then a spot.</li>
+      <li><b>Elixir:</b> every card shows its cost. The purple bar under the arena is your elixir. It refills by itself, up to 10.</li>
+      <li><b>Keys:</b> 1 to 4 pick a card, Esc cancels, Space pauses, L shows or hides names.</li>
+      <li><b>Phone:</b> if the page zooms in, pinch with two fingers to zoom back out.</li>
+      <li><b>Stuck?</b> Hint shows the card and spot the AI would play for you. A match with Hint on is not ranked.</li>
+    </ol>
+    <div class="row" style="margin-top:14px"><span></span><button class="primary" id="wnext">Next: your name and PIN</button></div>
+  </div>
+  <div id="wstep2" style="display:none">
+    <h2 id="w2title">Your name and PIN</h2>
+    <div class="tabs" id="wtabs"><button id="wtabnew" class="on">New player</button><button id="wtabold">I have played before</button></div>
+    <div class="wform">
+      <input id="wname" maxlength="24" placeholder="Your name (shown on the leaderboard)" autocomplete="username">
+      <input id="wpin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="Choose a 4-digit PIN" autocomplete="new-password">
+      <input id="wpin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="Type the PIN again" autocomplete="new-password">
+    </div>
+    <div class="small muted" id="wnote" style="margin-top:8px"></div>
+    <div class="small" id="werr" style="margin-top:6px;color:#ff8a8d" role="alert"></div>
+    <div class="row" style="margin-top:12px"><button id="wback">Back</button><button class="linkbtn" id="wskip">Look around first</button><button class="primary" id="wgo">Create my player</button></div>
+  </div>
 </div></div>
 
 <div class="modal" id="pinmodal"><div class="box">
@@ -334,6 +379,47 @@ async function post(p, body) {
 }
 async function getj(p) { const r = await fetch(withTok(p)); const d = await r.json(); if (!r.ok) throw new Error(d.error || r.status); return d; }
 function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+// ---------------------------------------------------------------- remembered sign-in (2026-11-17, the owner's request)
+// This page's address changes every two days (a new tunnel) and a browser keeps localStorage per address, so the
+// permanent link's page keeps the player id on the device and passes it here in the #fragment (#home=..&pid=..),
+// which browsers never send to a server. HOME_SHA: SHA-256 of the permanent link(s) allowed to do that (a hash, so
+// this page names no account). After a sign-in or sign-out this page tells the permanent link (a quick round trip).
+const HOME_SHA = ["1c1a568619324088794a0522dce976387584a67a38cef5d35bf56ff5703a1452"];   // https://<owner>.github.io/pr-play/
+const OK_PID = /^[A-Za-z0-9_-]{8,64}$/;
+let HOME = null;
+async function homeOk(u) {
+  try {
+    const x = new URL(u);
+    if (location.hostname === "127.0.0.1" && x.hostname === "127.0.0.1") return true;   // a local test copy only
+    if (x.protocol !== "https:" || !window.crypto || !crypto.subtle) return false;
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(u));
+    return HOME_SHA.indexOf(Array.from(new Uint8Array(d), b => b.toString(16).padStart(2, "0")).join("")) >= 0;
+  } catch (e) { return false; }
+}
+async function takeHandoff() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.has("home")) {
+    history.replaceState(null, "", location.pathname + location.search);   // the id leaves the address bar and history
+    if (await homeOk(h.get("home"))) {
+      HOME = h.get("home"); store("pr_home", HOME);
+      const pid = h.get("pid") || "";
+      if (OK_PID.test(pid)) store("pr_player_id", pid);
+      else if (h.get("out")) { try { localStorage.removeItem("pr_player_id"); } catch (e) {} }   // signed out on this device
+      store("pr_synced", OK_PID.test(pid) ? pid : "");      // what the permanent link holds now
+    }
+  }
+  if (!HOME) { const s = store("pr_home"); if (s && await homeOk(s)) HOME = s; }
+}
+function syncHome(pid) {                                    // returns true when the page is leaving for the round trip
+  pid = pid || "";
+  if (!HOME || (store("pr_synced") || "") === pid) return false;
+  store("pr_synced", pid);
+  if ((store("pr_synced") || "") !== pid) return false;     // storage blocked: never loop
+  const back = location.origin + location.pathname + location.search;
+  location.replace(HOME + "#" + new URLSearchParams(pid ? {save: pid, back: back} : {forget: "1", back: back}).toString());
+  return true;
+}
 
 // ======================================================================= icons and names (generic emoji, no game art)
 const UNIT_ICON = {
@@ -394,6 +480,7 @@ function show(id) {
   $(id).classList.add("on");
   document.body.classList.toggle("ingame", id === "game" || id === "queue");
   if (id === "game") resize();
+  checkZoom();
 }
 function fmtClock(tick) {
   const reg = tick < META.regulation, left = Math.max(0, ((reg ? META.regulation : META.max_ticks) - tick) / META.tps);
@@ -415,15 +502,24 @@ async function boot() {
   const r = el("option", "", "random preset (each match)"); r.value = "random"; $("oppdeck").appendChild(r);
   for (const d of Object.keys(META.decks)) { const o = el("option", "", d); o.value = d; $("oppdeck").appendChild(o); }
   buildPresets(); buildBuilder();
+  if (!META.pins) {                                         // since 2026-11-17 (owner's request): the name alone is the login
+    $("pin").style.display = "none";
+    $("loginnote").textContent = "Your name is your login: type the same name on any device to continue your record, deck and settings.";
+  }
+  await takeHandoff();
   const h = await post("/api/hello", {player_id: store("pr_player_id") || null});
-  if (h.player_id) { PID = h.player_id; PROFILE = h.profile || {}; $("name").value = PROFILE.name || ""; applyProfile(); showWho(h, false); showPin(h.new_pin); }
-  else { $("whoami").textContent = "Enter your name and PIN. New here? Pick a name and choose a 4-digit PIN."; $("whoami").className = "small muted"; }
+  if (h.player_id) {
+    PID = h.player_id; PROFILE = h.profile || {}; $("name").value = PROFILE.name || ""; applyProfile(); showWho(h, false); showPin(h.new_pin);
+    if (!h.new_pin && syncHome(PID)) return;               // signed in here before: let the permanent link remember it
+  }
+  else { $("whoami").textContent = META.pins ? "Enter your name and PIN. New here? Pick a name and choose a 4-digit PIN." : "Type your name to play."; $("whoami").className = "small muted"; }
   setDeckTab(deckChoice === "custom" ? "build" : "preset");
   renderDeck();
   refreshBoard();
   loadLLM();
   setInterval(() => { if ($("lobby").classList.contains("on")) refreshBoard(); }, 5000);
   show("lobby");
+  if (!PID && !store("pr_welcome_seen")) openWelcome(1);         // first visit in this browser, not signed in
 }
 function applyProfile() {                                    // a returning player's saved deck and settings
   if (Array.isArray(PROFILE.deck) && PROFILE.deck.length === 8) { building = PROFILE.deck.slice(); deckChoice = "custom"; }
@@ -439,18 +535,26 @@ function showWho(h, fresh) {
   $("whoami").textContent = h.created ? "New player: " + PROFILE.name + ". Welcome!" :
     (fresh ? "Welcome back, " : "Signed in as ") + PROFILE.name + " · " + n + (n === 1 ? " match" : " matches") + " played";
   $("whoami").className = "small " + (h.created ? "res-w" : "me-t");
-  $("changepin").style.display = PID ? "" : "none";
+  $("changepin").style.display = PID && META.pins ? "" : "none";
+  $("signout").style.display = PID ? "" : "none";
 }
+$("signout").onclick = () => {                              // this device forgets the player (here and at the permanent link)
+  try { localStorage.removeItem("pr_player_id"); } catch (e) {}
+  PID = null;
+  if (!syncHome("")) location.reload();
+};
 function showPin(pin) {                                      // a PIN the server made for this player: shown once
   if (!pin) return;
   $("pinbig").textContent = pin;
   $("pinmodal").style.display = "flex";
 }
-$("pinok").onclick = () => { $("pinmodal").style.display = "none"; };
-async function login(name) {                                  // name + PIN is the login (same name = same player)
-  const pin = $("pin").value.trim();
+$("pinok").onclick = () => { $("pinmodal").style.display = "none"; if (PID) syncHome(PID); };
+async function login(name, pin, isNew) {                      // name + PIN is the login (same name = same player)
+  pin = String(pin || "").trim();
   if (pin && !/^[0-9]{4}$/.test(pin)) throw new Error("A PIN is 4 digits.");
-  const h = await post("/api/hello", {player_id: store("pr_player_id") || null, name: name, pin: pin});
+  const body = {player_id: store("pr_player_id") || null, name: name, pin: pin};
+  if (isNew) body.new = true;                                 // welcome "New player": a taken name is refused, no PIN try used
+  const h = await post("/api/hello", body);
   PID = h.player_id; store("pr_player_id", PID); PROFILE = h.profile || {};
   $("name").value = PROFILE.name || name; $("pin").value = ""; $("err").textContent = "";
   if (h.created) await saveProfile({deck: currentDeck(), opp_deck: $("oppdeck").value, seat: +$("seat").value, speed: +$("speed").value});
@@ -458,6 +562,7 @@ async function login(name) {                                  // name + PIN is t
   showWho(h, true);
   showPin(h.new_pin);
   refreshBoard();
+  if (!h.new_pin) syncHome(PID);                            // a shown-once PIN syncs when it is dismissed
 }
 $("changepin").onclick = async () => {
   const p = (prompt("New 4-digit PIN for " + (PROFILE.name || "you") + ":") || "").trim();
@@ -521,7 +626,60 @@ function renderDeck() {
 }
 async function saveProfile(f) { if (!PID) return; try { const r = await post("/api/profile", Object.assign({player_id: PID}, f)); PROFILE = r.profile; } catch (e) { flashErr(e.message); } }
 function flashErr(msg, ok) { const e = $("err"); e.textContent = msg; e.style.color = ok ? "#6fd39b" : "#ff8a8d"; clearTimeout(flashErr.h); flashErr.h = setTimeout(() => e.textContent = "", 4000); }
-$("savename").onclick = async () => { const n = $("name").value.trim(); if (!n) { flashErr("Please enter a name."); return; } try { await login(n); } catch (e) { flashErr(e.message); } };
+$("savename").onclick = async () => { const n = $("name").value.trim(); if (!n) { flashErr("Please enter a name."); return; } try { await login(n, $("pin").value); } catch (e) { flashErr(e.message); } };
+
+// ---------------------------------------------------------------- welcome window (how to play, then name + PIN)
+let wNew = true;
+function openWelcome(step) { $("welcome").style.display = "flex"; wStep(step || 1); }
+function closeWelcome() { $("welcome").style.display = "none"; store("pr_welcome_seen", "1"); }
+function wErr(m) { $("werr").textContent = m || ""; }
+function wStep(n) {
+  $("wstep1").style.display = n === 1 ? "" : "none"; $("wstep2").style.display = n === 2 ? "" : "none";
+  $("wnext").textContent = PID ? "Got it" : (META.pins ? "Next: your name and PIN" : "Next: your name");
+  wErr();
+  if (n === 2) { wTab(wNew); setTimeout(() => $("wname").focus(), 50); } else setTimeout(() => $("wnext").focus(), 50);
+}
+function wTab(isNew) {
+  if (!META.pins) {                                         // no PINs: one name box, no tabs
+    wNew = false;
+    $("w2title").textContent = "Your name"; $("wtabs").style.display = "none";
+    $("wpin").style.display = $("wpin2").style.display = "none";
+    $("wname").placeholder = "Your name (shown on the leaderboard)";
+    $("wgo").textContent = "Continue";
+    $("wnote").textContent = "Your name is your login: type the same name on any device to continue your record and deck.";
+    wErr();
+    return;
+  }
+  $("wpin").style.display = "";
+  wNew = isNew;
+  $("wtabnew").classList.toggle("on", isNew); $("wtabold").classList.toggle("on", !isNew);
+  $("wpin2").style.display = isNew ? "" : "none";
+  $("wpin").placeholder = isNew ? "Choose a 4-digit PIN" : "Your 4-digit PIN";
+  $("wpin").setAttribute("autocomplete", isNew ? "new-password" : "current-password");
+  $("wgo").textContent = isNew ? "Create my player" : "Sign in";
+  $("wnote").textContent = isNew
+    ? "The PIN works like a password: with your name, it signs you in on any device and keeps your record and deck. Write it down."
+    : "Use the same name and PIN as last time, on any device.";
+  wErr();
+}
+$("wnext").onclick = () => { if (PID) closeWelcome(); else wStep(2); };
+$("wback").onclick = () => wStep(1);
+$("wskip").onclick = closeWelcome;
+$("wtabnew").onclick = () => wTab(true);
+$("wtabold").onclick = () => wTab(false);
+$("wgo").onclick = async () => {
+  const n = $("wname").value.trim(), p = META.pins ? $("wpin").value.trim() : "";
+  if (!n) { wErr("Please enter a name."); return; }
+  if (META.pins && !/^[0-9]{4}$/.test(p)) { wErr("A PIN is exactly 4 digits."); return; }
+  if (META.pins && wNew && p !== $("wpin2").value.trim()) { wErr("The two PINs are different."); return; }
+  $("wgo").disabled = true;
+  try { await login(n, p, wNew); $("wpin").value = $("wpin2").value = ""; closeWelcome(); }
+  catch (e) { wErr(e.message); }
+  finally { $("wgo").disabled = false; }
+};
+for (const id of ["wname", "wpin", "wpin2"]) $(id).addEventListener("keydown", ev => { if (ev.key === "Enter") $("wgo").onclick(); });
+document.addEventListener("keydown", ev => { if (ev.key === "Escape" && $("welcome").style.display === "flex") closeWelcome(); });
+$("howto").onclick = () => openWelcome(1);
 $("name").addEventListener("keydown", ev => { if (ev.key === "Enter") $("savename").onclick(); });
 $("pin").addEventListener("keydown", ev => { if (ev.key === "Enter") $("savename").onclick(); });
 $("oppdeck").onchange = () => saveProfile({opp_deck: $("oppdeck").value});
@@ -1153,6 +1311,16 @@ $("menubtn").onclick = () => { $("sheet").style.display = "block"; };
 $("sheetclose").onclick = () => { $("sheet").style.display = "none"; };
 $("sheet").addEventListener("click", ev => { if (ev.target.id === "sheet") $("sheet").style.display = "none"; });
 window.addEventListener("resize", () => { setPhone(); if ($("game").classList.contains("on")) resize(); });
+// Zoomed in during a match (a phone's pinch zoom): a note at the top of what is on screen says how to get back. A
+// fixed element sits on the unzoomed page, so it is moved to the visible corner and shrunk by the zoom factor.
+function checkZoom() {
+  const v = window.visualViewport, h = $("zoomhint");
+  const on = !!v && v.scale > 1.05 && document.body.classList.contains("ingame");
+  h.style.display = on ? "block" : "none";
+  document.body.classList.toggle("zoomed", on);
+  if (on) h.style.transform = "translate(" + v.offsetLeft + "px," + v.offsetTop + "px) scale(" + (1 / v.scale) + ")";
+}
+if (window.visualViewport) { visualViewport.addEventListener("resize", checkZoom); visualViewport.addEventListener("scroll", checkZoom); }
 let lastWrap = "";
 if (window.ResizeObserver) new ResizeObserver(() => {
   const w = $("boardwrap"), k = w.clientWidth + "x" + w.clientHeight;
@@ -1254,7 +1422,7 @@ function emoji(ch, x, y, size, alpha) {
   ctx.globalAlpha = alpha; ctx.font = Math.round(size) + "px " + EMOJI_FONT; ctx.fillText(ch, x, y + size * 0.05); ctx.globalAlpha = 1;
 }
 function label(text, x, y, mine) {
-  ctx.font = "600 " + Math.max(9, Math.round(T * 0.42)) + "px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  ctx.font = "600 " + Math.max(10, Math.round(T * 0.45)) + "px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
   ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.75)"; ctx.strokeText(text, x, y); ctx.fillStyle = mine ? "#cfe0ff" : "#ffd0d1"; ctx.fillText(text, x, y);
 }
 function drawCracks(x, y, half, id, frac) {
@@ -1365,7 +1533,41 @@ function drawUnit(tr, now) {
   ctx.globalAlpha = 1;
   emoji(unitIcon(e[E.unit], e[E.card]), x, cy, r * 1.4, a);
   if ((!e[E.dep] && e[E.hp] < e[E.maxhp]) || e[E.shield] > 0 || !swarm(e[E.card])) hpBar(x, cy - r - T * 0.32, Math.max(2 * r, T * 0.8), e[E.hp], e[E.maxhp], e[E.shield], mine);
-  if (showLabels && !swarm(e[E.card])) label(unitName(e[E.unit], e[E.card]), x, cy + r + 2, mine);
+}
+// Names (button Aa / key L), drawn after every unit and projectile so nothing covers them, and moving with what they
+// name. A unit of a one- or two-unit card has its own name (Hog Rider, Golemite). A swarm card (3 or more units)
+// gets its card's name once per group of its units that stay within 2.5 tiles of each other: 15 skeletons walking
+// together show one "Skeleton Army", and a group that splits off gets its own. Spells are named while they fly
+// (Fireball, The Log) and while they act on an area (Poison, Freeze).
+function labelPlan(units, cardOf) {
+  const out = [], anchors = [];
+  for (const u of units.slice().sort((a, b) => a.id - b.id)) {
+    const k = cardOf(u.card);
+    if (!(k && k.count >= 3)) { out.push({id: u.id, text: u.name}); continue; }
+    if (anchors.some(a => a.mine === u.mine && a.card === u.card && Math.hypot(a.x - u.x, a.y - u.y) < 2500)) continue;
+    anchors.push(u);
+    out.push({id: u.id, text: k.name});
+  }
+  return out;
+}
+function drawLabels(now) {
+  if (!showLabels) return;
+  const units = [], where = new Map();
+  for (const tr of tracks.values()) {
+    const e = tr.e; if (e[E.kind] === "tower") continue;
+    const c = posOf(tr, now), r = Math.max(P(e[E.r] || 400), T * 0.36), lift = e[E.fly] ? T * 0.45 : 0;
+    units.push({id: e[E.id], mine: !!e[E.mine], card: e[E.card], x: c[0], y: c[1], name: unitName(e[E.unit], e[E.card])});
+    where.set(e[E.id], [P(c[0]), P(c[1]) - lift + r + 2, !!e[E.mine]]);
+  }
+  for (const l of labelPlan(units, c => cardsById[c])) { const w = where.get(l.id); label(l.text, w[0], w[1], w[2]); }
+  for (const tr of ptracks.values()) {
+    const p = tr.p, k = cardsById[p[3]];
+    if (k && k.kind === "spell") { const c = posOf(tr, now); label(k.name, P(c[0]), P(c[1]) + T * 0.6, !!p[1]); }
+  }
+  for (const f of S.effs) {
+    const k = cardsById[f[3]];
+    if (k && k.kind === "spell") label(k.name, P(f[5]), P(f[6]) + T * 0.5, !!f[1]);
+  }
 }
 function drawAttackLines(now) {
   ctx.lineWidth = Math.max(1, T * 0.07);
@@ -1485,6 +1687,7 @@ function frame() {
     if (EMOJI_OK) emoji("💨", P(d.x), P(d.y), T * 0.9, 1 - k);
     else { ctx.strokeStyle = "rgba(230,230,230," + (0.8 * (1 - k)) + ")"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(P(d.x), P(d.y), T * (0.3 + 0.4 * k), 0, 7); ctx.stroke(); }
   }
+  drawLabels(now);
   drawAdvice(now);
   drawQueued();
   if (KIND === "match") drawPending(now);
@@ -1527,7 +1730,8 @@ function bindCard(d, i) {
   d.addEventListener("pointerdown", ev => {
     if (!S || S.over || KIND !== "match") return;
     ev.preventDefault();
-    drag = {card: S.hand[i], x0: ev.clientX, y0: ev.clientY, id: ev.pointerId, moving: false, prev: selected};
+    // a second finger (a pinch) keeps the first finger's "selected before", so a cancelled pinch restores it
+    drag = {card: S.hand[i], x0: ev.clientX, y0: ev.clientY, id: ev.pointerId, moving: false, prev: drag ? drag.prev : selected};
     try { d.setPointerCapture(ev.pointerId); } catch (e) {}
     selected = drag.card; updatePanels();                       // feedback on touch-down
   });

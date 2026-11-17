@@ -65,9 +65,44 @@ A quick tunnel's address changes at every site job, and a job lasts at most 2 da
 
 ## What a player sees
 
+- **Anti-stall rule (since 2026-11-17, the owner's request for "a simple fix RIGHT NOW").** The released model can
+  sit and wait when the opponent goes quiet (see the passive-opponent diagnosis, runs/diag/passive_probe_20261116/).
+  On the site, once the model has been on full elixir (10) for 5 s (`ANTI_STALL_S`, `--anti-stall`, 0 = off; the
+  owner chose 5 s over 2 s), its "wait" action is masked out for that decision. It then plays the card and spot its
+  own policy prefers among plays, sampled as always. The lobby label says so, each forced play is marked
+  `"forced": true` in the match events, and the record's `opponent` block holds `anti_stall_s` and
+  `forced_plays`. Replays are unaffected (they replay the recorded plays). Hint and Autopilot do not use the rule.
+  Test: runs/diag/anti_stall_20261117/.
+- **Welcome window (since 2026-11-17, the owner's request).** A first-time visitor who is not signed in gets a
+  two-step window. Step 1 is how to play: how to win, how to play a card, elixir, keys, pinching out on a phone, and
+  Hint. Step 2 is the name and PIN, with two tabs:
+  - **New player:** name, PIN, and the PIN typed again. It sends `new: true` to `/api/hello`, so a name that is
+    already taken gets "that name is taken" before any PIN check and never uses up that player's PIN tries.
+    Tested: six "New player" tries on a taken name with wrong PINs, then one wrong PIN on "I have played before",
+    which said "4 tries left".
+  - **I have played before:** name and PIN, the same login as the lobby form.
+
+  "Look around first" or Esc closes it. The browser remembers that (localStorage `pr_welcome_seen`), so it does not
+  come back. A signed-in browser never gets it. "How to play" in the lobby header opens step 1 again. On phones,
+  inputs and menus use 16 px text, because iOS Safari zooms into any text box under 16 px when it gets focus.
 - **Lobby.** Name, deck, opponent's deck, seat and speed, plus the leaderboard and recent matches.
   - **Deck:** one of the 7 training-pool presets, or your own 8 cards from the 64.
-  - **Name + PIN is the login (since 2026-11-09 19:20, the owner's request):** a name with its 4-digit PIN (any case
+  - **The name alone is the login (since 2026-11-17, the owner's request: "get rid of the PIN system whatsoever -
+    just let the user enter their name and let them play").** The same name (any case or spacing, with or without
+    `_ - . '`) is the same player on any device; a new name makes a new player. No PIN is asked for, checked or
+    made: the page hides every PIN box (`META.pins` is false), `/api/pin` answers "this site has no PINs", and the
+    "New player" tab and the "taken" check are gone with them. Nothing was deleted: the PIN records players
+    already have stay in players.json, unused. The old login below comes back with `--pins` (tests run it that
+    way). Anyone who types a name plays as that player.
+  - **Remembered sign-in (2026-11-17, the owner's request):** a browser that signed in once is signed in the next
+    time, also after the game's address changes. The game's address changes every two days and a browser keeps a
+    sign-in per address, so the permanent link's page (hpc/play_redirect.html, an address that never changes) keeps
+    the player id on the device and hands it to the game in the address's #fragment (`#home=..&pid=..`), which
+    browsers never send to a server; the game removes it from the address bar at once. The game trusts `home` only
+    if its SHA-256 is in `HOME_SHA` (a hash, so the page names no account). After a sign-in, or the new **Sign
+    out**, the game makes a quick round trip to that page (`#save=<id>&back=<game>` / `#forget=1&back=<game>`;
+    `back` must be a trycloudflare address). A sign-out also leaves a "signed out" mark at the permanent link, handed over as `#out=1`, so an older game address that still remembers the player forgets it too; with neither mark nor id, a sign-in the game address already had (from before this change) is kept and sent up once. Private windows or cleared site data forget it, as with any site.
+  - **Name + PIN login (2026-11-09 19:20 to 2026-11-17, now only with `--pins`):** a name with its 4-digit PIN (any case
     or spacing, on any device or tunnel address) continues that player, with their record, saved deck and settings.
     A new name must choose a PIN and makes a new player; no record is made until a name is given. The browser also
     remembers the player id per address (localStorage; that id is itself a long secret, so that browser needs no
@@ -78,6 +113,10 @@ A quick tunnel's address changes at every site job, and a job lasts at most 2 da
     - **Players from before PINs** (the 5 players of 2026-11-06..09): at their next sign-in, by name or by their
       browser's stored id, the site gives them a random PIN, shown once ("I saved it"). The owner chose this; the
       risk is that someone else types their name first.
+      Since 2026-11-17 PINs are off (see above), so this no longer applies.
+    - **Names are unique up to case, spaces and `_ - . '` (since 2026-11-17).** `name_key` drops those characters,
+      so "Sam", "sam." and "S am" are one name with one PIN. A name with no letter or digit is refused.
+      No existing names collided under the new key.
     - **Change my PIN:** a signed-in player can choose a new PIN (link under the name box).
     - **Owner maintenance:** `$DATA_DIR/human_play/admin.json` = `{"drop": [names], "reset_pin": [names]}`, applied
       once at the next server start (`play/play_restart.sh`), then renamed `admin.done.<time>.json` and logged in
@@ -115,6 +154,15 @@ A quick tunnel's address changes at every site job, and a job lasts at most 2 da
       taken, cracks appear below 67% and 34% HP, and a destroyed tower leaves rubble.
     - **Units** are shaded team tokens that flash when hit, with a spawn ring, a shadow (raised for flyers), name
       labels and HP bars.
+    - **Names (since 2026-11-16, user request "every cards name should be visible as it moves"):** every card on
+      the board is named, and the name moves with it. Names are drawn after all units and projectiles, so nothing
+      covers them. A unit of a one- or two-unit card shows its own name (Hog Rider, Golemite). A swarm card (3 or
+      more units: Skeletons, Skeleton Army, Goblin Gang, Bats, Minion Horde, ...) shows its card name once per group
+      of its units within 2.5 tiles of each other, so 15 skeletons walking together show one "Skeleton Army" and a
+      group that splits off gets its own. Spells are named while they fly (Fireball, Rocket, Giant Snowball, Goblin
+      Barrel) or act on an area (Arrows, Poison, Earthquake, The Log, Barbarian Barrel). Zap, Freeze and Lightning
+      leave nothing on the board, so they show only the name that pops up where any card lands. The **Aa** button
+      (key L) hides or shows all names.
     - **Icons:** where the browser has no colour-emoji font, cards and units show short name tags (for example
       "HR" for Hog Rider) instead of emoji.
     - **Towers panel:** the side panel lists all six towers' HP.
@@ -206,6 +254,18 @@ A quick tunnel's address changes at every site job, and a job lasts at most 2 da
 - **Touch input.** The hand is redrawn only when it changes, so a finger never lands on an element that is being
   replaced; a card reacts on touch-down. Canvases draw at most at 2x resolution (3x phone screens look the same and
   draw 2.25x fewer pixels).
+- **Zoom (fixed 2026-11-16, user report: "if it zooms in - I cant zoom out or it does not react").**
+  - **Cause:** the page asks phones not to zoom (`user-scalable=no`), but Safari on iPhone zooms anyway. The board
+    and the hand took every touch for the game (`touch-action: none`), so once zoomed in, a two-finger pinch on the
+    board or a card never reached the browser, and those fill most of a zoomed-in screen.
+  - **Fix:** one finger stays the game's (tap, drag a card); a two-finger pinch on the board or a card now goes to
+    the browser (`touch-action: pinch-zoom`). While the page is zoomed in, the board and cards give all gestures to
+    the browser, and a note at the top of the visible area says "Zoomed in: pinch with two fingers to zoom out".
+    Double-tap zoom is off on the game screen. A pinch that starts on a card leaves the selection as it was.
+  - **Checked** in headless Chromium (390x844 touch screen, zoom allowed as on an iPhone), old page vs new page:
+    zoomed in to 3.5-4x from the header row, a pinch out on the board stayed at 3.5-4x on the old page (also on a
+    second try) and went back to 1x on the new one. A two-finger spread on a card reached the browser only on the
+    new page. A one-finger drag of a card onto the board still plays it.
 - **Server stalls seen 2026-11-09.** In one match (14:08) the policy took 100 ms per decision instead of the usual
   ~3.5 ms (2.4 ms re-measured on the node afterwards). The job's 8 cores are its own (cgroup cpuset, no throttling),
   but cluster-wide agents (`ir_agent`, `splunkd`) may run on any core during the node security patching. Not

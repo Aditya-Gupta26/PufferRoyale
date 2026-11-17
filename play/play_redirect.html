@@ -34,7 +34,31 @@
 const REPO = "__REPO__";
 const OK_URL = /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/;
 const OK_TOKEN = /^[A-Za-z0-9_-]{8,64}$/;
+const OK_PID = /^[A-Za-z0-9_-]{8,64}$/;
+const LOCAL = location.hostname === "127.0.0.1";                // a local test copy may forward to a local server
+const okUrl = u => OK_URL.test(u) || (LOCAL && /^http:\/\/127\.0\.0\.1:[0-9]+$/.test(u));
+const HOME = location.origin + location.pathname.replace(/index\.html$/, "");
 const $ = id => document.getElementById(id);
+function mem(k, v) {
+  try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }
+  catch (e) { return null; }
+}
+// Remembered sign-in (2026-11-17, the owner's request): the game's own address changes every two days and a browser
+// keeps a sign-in per address, so THIS page (whose address never changes) keeps the player's id on this device and
+// hands it to the game in the address's #fragment, which browsers never send to any server. The game sends it back
+// here after a sign-in (#save=<id>&back=<game>) or a sign-out (#forget=1&back=<game>); "back" must be a game address.
+function handoff() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  let back;
+  try { back = new URL(h.get("back") || ""); } catch (e) { return false; }
+  if (!okUrl(back.origin)) return false;
+  if (OK_PID.test(h.get("save") || "")) { mem("pr_pid", h.get("save")); mem("pr_out", null); }
+  else if (h.get("forget")) { mem("pr_pid", null); mem("pr_out", "1"); }   // signed out: other addresses forget too
+  else return false;
+  back.hash = "";
+  location.replace(back.href);
+  return true;
+}
 async function readTarget() {
   const tries = [["https://api.github.com/repos/" + REPO + "/contents/target.json", {Accept: "application/vnd.github.raw+json"}],
                  ["target.json?t=" + Date.now(), {}]];             // this site's own copy (may lag a few minutes)
@@ -53,12 +77,16 @@ async function alive(url) {
 let waits = 0;
 async function go() {
   const t = await readTarget();
-  if (t && t.status === "up" && OK_URL.test(t.url) && await alive(t.url)) {
+  if (t && t.status === "up" && okUrl(t.url) && await alive(t.url)) {
     $("msg").textContent = "Taking you to the game…";
     const q = new URLSearchParams(location.search);
     if (t.token && OK_TOKEN.test(t.token)) q.set("token", t.token);
     const qs = q.toString();
-    location.replace(t.url + "/" + (qs ? "?" + qs : "") + location.hash);
+    const f = new URLSearchParams({home: HOME});               // the game checks this address before trusting the id
+    const pid = mem("pr_pid");
+    if (pid && OK_PID.test(pid)) f.set("pid", pid);
+    else if (mem("pr_out")) f.set("out", "1");
+    location.replace(t.url + "/" + (qs ? "?" + qs : "") + "#" + f.toString());
     return;
   }
   waits++;
@@ -67,7 +95,7 @@ async function go() {
     ". If it takes long, try again later.";
   setTimeout(go, Math.min(60000, 15000 + 5000 * waits));
 }
-go();
+if (!handoff()) go();
 </script>
 </body>
 </html>

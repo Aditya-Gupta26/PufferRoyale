@@ -7,8 +7,9 @@
 
     # NYU Torch: play/play_site.sbatch starts it on a CPU node (see that file for the public link)
 
-Players open the shared link, sign in with a name and a 4-digit PIN (a new name chooses its PIN; the same name +
-PIN on any device continues the same player), pick a deck (one of the 7 training-pool presets or their own 8
+Players open the shared link and type a name (since 2026-11-17, the owner's request, the name alone is the login: the
+same name on any device continues the same player; no PIN. The 2026-11-09 name + PIN login below is kept behind
+--pins, and the PIN records players already have are kept, unused), pick a deck (one of the 7 training-pool presets or their own 8
 cards; saved per player, so the next visit starts with it) and the opponent's deck, and play. At most
 --max-players matches run at once; later players wait in a line that moves on its own. Players made before PINs
 (2026-11-09) get a random PIN shown once at their next sign-in. After PIN_TRIES wrong PINs a name is locked for
@@ -84,6 +85,10 @@ REGULATION_TICKS = 3600
 MAX_TICKS = 6000
 BOARD_W, BOARD_H = 18, 32      # tiles; 1 tile = 1000 engine units
 ELIXIR_UNIT = 2800
+ELIXIR_FULL = 10 * ELIXIR_UNIT
+ANTI_STALL_S = 5.0             # 2026-11-17 owner's request ("a simple fix RIGHT NOW"; 5 s, not 2: "2 is too less"): once
+                               # the model has sat on full elixir this long, "wait" is masked out and it plays its own
+                               # most-wanted card and spot (sampled as always). 0 = off (--anti-stall).
 MAX_QUEUED = 3                 # a player's plays waiting to go in (one per tick)
 SPEEDS = (0.25, 0.5, 0.75, 1.0)
 REPLAY_SPEEDS = (0.5, 1.0, 2.0, 4.0)
@@ -238,8 +243,10 @@ def deck_spec(spec, pr, allow_random=False):
 
 
 def name_key(name):
-    """The login key of a name: the cleaned name, lower case ('  aditya ' and 'Aditya' are the same player)."""
-    return clean_name(name).lower()
+    """The login key of a name: the cleaned name in lower case without spaces or _ - . ' ('  aditya ', 'Aditya',
+    'a-ditya' and 'A ditya' are the same player; stricter since 2026-11-17, the owner's request that a name be
+    unique). A name with no letter or digit has no key."""
+    return re.sub(r"[\s_\-.']", "", clean_name(name)).lower()
 
 
 def public_id(pid):
@@ -318,8 +325,9 @@ class Store:
     """players.json and matches/<id>.json under one directory; the leaderboard is computed from an
     in-memory index of the match summaries (rebuilt from the files at start)."""
 
-    def __init__(self, root):
+    def __init__(self, root, pins=False):
         self.root = root
+        self.pins = bool(pins)          # False (default since 2026-11-17): the name alone is the login
         self.mdir = os.path.join(root, "matches")
         os.makedirs(self.mdir, exist_ok=True)
         self.lock = threading.Lock()
@@ -426,6 +434,12 @@ class Store:
     def _save_players(self):
         """Write players.json. Two servers can share the data for a while (a new site job starts before the old one
         ends), so players that only the file has (made by the other server) are taken in first, not overwritten."""
+        self._take_in_disk_players()
+        atomic_json(os.path.join(self.root, "players.json"), self.players)
+
+    def _take_in_disk_players(self):
+        """Players that only players.json has (made by the other server of an overlap, after this one read the
+        file) are taken in, not overwritten; PINs merge by time (_take_newer_pin)."""
         p = os.path.join(self.root, "players.json")
         try:
             disk = json.load(open(p)) if os.path.isfile(p) else {}
@@ -442,7 +456,6 @@ class Store:
                     by_name[k] = pid
             else:
                 self._take_newer_pin(self.players[pid], pl)
-        atomic_json(p, self.players)
 
     @staticmethod
     def _take_newer_pin(mine, disk):
@@ -483,26 +496,38 @@ class Store:
             raise ValueError(f"wrong PIN: this name is locked for {PIN_LOCK_S // 60} min")
         raise ValueError(f"wrong PIN ({PIN_TRIES - f[0]} {'try' if PIN_TRIES - f[0] == 1 else 'tries'} left)")
 
-    def hello(self, pid, name=None, pin=None):
-        """(player id or None, profile, created, new PIN or None). With a name: name + PIN is the login. A known
-        name needs its PIN; a new name needs a PIN of 4 digits and makes a new player. Without a name: the browser's
-        stored id (itself a long secret), when it is known; nobody is created until a name is given. A player
-        without a PIN (made before PINs, or reset by the owner) gets a random one, returned ONCE as the new PIN."""
+    def hello(self, pid, name=None, pin=None, new=False):
+        """(player id or None, profile, created, new PIN or None). With a name: the name is the login (same name =
+        same player, on any device); a new name makes a new player. Without a name: the browser's stored id, when it
+        is known; nobody is created until a name is given. PINs are off by default (2026-11-17, the owner's request:
+        "just let the user enter their name"): no PIN is asked for or checked, and the PIN records players already
+        have stay in players.json untouched.
+        With pins=True (--pins, the login of 2026-11-09 to 2026-11-17): a known name needs its PIN; a new name needs
+        a PIN of 4 digits; a player without a PIN gets a random one, returned ONCE as the new PIN; new=True (the
+        welcome window's "New player" form) refuses a taken name before any PIN check, so a newcomer never uses
+        up another player's PIN tries."""
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
         with self.lock:
             key = name_key(name) if name is not None else ""
             created = False
+            if (key and key not in self.by_name) or (not key and isinstance(pid, str) and ID_RE.match(pid)
+                                                     and pid not in self.players):
+                self._take_in_disk_players()     # made by the other server of an overlap (2026-11-17): same player
             if key:
                 if key in self.by_name:
+                    if new and self.pins:
+                        raise ValueError('that name is taken: choose another one (or use "I have played before")')
                     pid = self.by_name[key]
                     self._refresh_from_disk(pid)
-                    if self.players[pid].get("pin"):
+                    if self.pins and self.players[pid].get("pin"):
                         self._check_pin(key, self.players[pid], pin)
                 else:
-                    if not (isinstance(pin, str) and PIN_RE.match(pin)):
+                    if self.pins and not (isinstance(pin, str) and PIN_RE.match(pin)):
                         raise ValueError("new name: choose a PIN of 4 digits (you need it to sign in again)")
                     pid, created = secrets.token_urlsafe(12), True
-                    self.players[pid] = {"name": clean_name(name), "created": now, "pin": make_pin_record(pin)}
+                    self.players[pid] = {"name": clean_name(name), "created": now}
+                    if self.pins:
+                        self.players[pid]["pin"] = make_pin_record(pin)
                     self.by_name[key] = pid
             elif not (isinstance(pid, str) and ID_RE.match(pid) and pid in self.players):
                 return None, {}, False, None
@@ -510,7 +535,7 @@ class Store:
                 self._refresh_from_disk(pid)
             pl = self.players[pid]
             new_pin = None
-            if not pl.get("pin"):
+            if self.pins and not pl.get("pin"):
                 new_pin = f"{secrets.randbelow(10000):04d}"
                 pl["pin"] = make_pin_record(new_pin)
             pl["last_seen"] = now
@@ -518,7 +543,9 @@ class Store:
             return pid, public_profile(pl), created, new_pin
 
     def set_pin(self, pid, pin):
-        """A signed-in player (the page holds its secret player id) chooses a new PIN."""
+        """A signed-in player (the page holds its secret player id) chooses a new PIN (only with --pins)."""
+        if not self.pins:
+            raise ValueError("this site has no PINs: your name is your login")
         if not (isinstance(pin, str) and PIN_RE.match(pin)):
             raise ValueError("a PIN is 4 digits")
         with self.lock:
@@ -689,6 +716,23 @@ class Board:
             self.cond.notify_all()
 
 
+def model_action(player, obs_row, force_play=False):
+    """The model's action, exactly as PolicyPlayer.act samples it (same logits, same generator draw). With force_play
+    (the anti-stall rule, ANTI_STALL_S) the wait action 0 is masked out first, so the model plays the card and spot
+    its own distribution prefers among plays; when no play is legal (e.g. the start-of-match lockout) it waits."""
+    import torch
+    from pufferroyale.league import select_actions
+    with torch.no_grad():
+        st = player.state if player.recurrent else {}
+        logits, _ = player.policy.forward_eval(torch.as_tensor(obs_row[None, :]), st)
+    if force_play:
+        lg = logits.float().clone()
+        if bool((lg[0, 1:] > -1e30).any()):             # illegal actions are finfo.min
+            lg[0, 0] = torch.finfo(lg.dtype).min
+            logits = lg
+    return int(select_actions(logits, player.greedy, player.gen)[0])
+
+
 class LiveMatch(Board):
     """A player against the policy."""
 
@@ -716,6 +760,9 @@ class LiveMatch(Board):
         self.player = copy.copy(server.player)          # shares the weights; own generator and state
         self.player.gen = torch.Generator().manual_seed((self.seed * 2 + self.mt) & ((1 << 62) - 1))
         self.player.state = {"lstm_h": None, "lstm_c": None}
+        self.stall_ticks = int(round(server.anti_stall * TICKS_PER_SECOND))   # 0 = the rule is off
+        self.full_since = None          # tick since which the model's elixir has been full
+        self.forced_plays = 0           # plays the anti-stall rule made
         self.speed = float(params["speed"])
         self.min_speed = self.speed
         self.paused = False
@@ -761,17 +808,25 @@ class LiveMatch(Board):
         if beat:
             st = g.state()
             t0 = time.perf_counter()
+            if int(st["elixir"][self.mt]) < ELIXIR_FULL:
+                self.full_since = None
+            elif self.full_since is None:
+                self.full_since = t
+            force = self.stall_ticks > 0 and self.full_since is not None and t - self.full_since >= self.stall_ticks
             with INFER:
-                a = self.player.act(g.obs(self.mt))
+                a = model_action(self.player, g.obs(self.mt), force)
             a = self.player.fine(g, self.mt, a)
             self.decision_ms.append((time.perf_counter() - t0) * 1000.0)
             if a:
                 slot, tx, ty = pr.decode_action(a)
                 card = int(st["hand"][self.mt][slot])
                 err = g.play_tile(self.mt, slot, tx, ty)
-                self._event("model", card, slot, tx, ty, err, t)
+                ev = self._event("model", card, slot, tx, ty, err, t)
+                if force:
+                    ev["forced"] = True                  # made by the anti-stall rule
                 if err == pr.PlayError.OK:
                     self.plays.append([t, self.mt, slot, tx, ty, card])
+                    self.forced_plays += int(force)
         if self.queue:
             st = st or g.state()                         # the policy's play does not touch the player's hand
             q = self.queue.pop(0)
@@ -981,7 +1036,8 @@ class LiveMatch(Board):
         return {
             "summary": summary,
             "opponent": {"checkpoint": os.path.abspath(srv.args.checkpoint), "sha256": srv.checkpoint_sha,
-                         "label": srv.label, "greedy": bool(srv.args.greedy)},
+                         "label": srv.label, "greedy": bool(srv.args.greedy),
+                         "anti_stall_s": srv.anti_stall, "forced_plays": self.forced_plays},
             "settings": {"frame_skip": FRAME_SKIP, "deploy_lockout_ticks": self.game.deploy_lockout_ticks,
                          "tiebreak": self.game.tiebreak, "tower_troops": list(self.game.tower_troops),
                          "paused_s": round(self.paused_s, 1)},
@@ -1259,7 +1315,10 @@ class Server:
             self.label = args.label or checkpoint_label(self.player.path)
         else:
             self.player, self.checkpoint_sha, self.label = player, "0" * 64, args.label or "test policy"
-        self.store = Store(args.data_dir)
+        self.anti_stall = max(0.0, float(getattr(args, "anti_stall", ANTI_STALL_S) or 0.0))
+        if self.anti_stall > 0:
+            self.label += f" · must play after {self.anti_stall:g} s on full elixir"
+        self.store = Store(args.data_dir, pins=bool(getattr(args, "pins", False)))
         self.llm_games = LLMGames(LLM_GAMES_FILE, getattr(args, "llm_replays", None))
         self.claude_on = bool(args.claude_relay_dir)
         self.voice_dir = getattr(args, "voice_dir", None)
@@ -1500,7 +1559,7 @@ class Server:
             cards.append({"id": i, "name": name, "cost": pr.CARD_COSTS[i], "kind": info.get("kind"),
                           "unit": unit.get("name") if isinstance(unit, dict) else unit,
                           "radius": info.get("radius") or 0, "count": info.get("count") or 1})
-        return {"label": self.label, "greedy": self.args.greedy, "cards": cards,
+        return {"label": self.label, "greedy": self.args.greedy, "cards": cards, "pins": self.store.pins,
                 "decks": {k: list(pr.DECKS[k]) for k in POOL_DECKS}, "terrain": self.terrain,
                 "speeds": list(SPEEDS), "replay_speeds": list(REPLAY_SPEEDS), "tps": TICKS_PER_SECOND,
                 "frame_skip": FRAME_SKIP, "regulation": REGULATION_TICKS, "max_ticks": MAX_TICKS,
@@ -1808,7 +1867,7 @@ def make_handler(server, token, owner_key, html):
                     raise ValueError("please enter a name (letters, digits, spaces)")
                 pin = body.get("pin")
                 pid, pl, created, new_pin = st.hello(body.get("player_id"), body.get("name"),
-                                                     None if pin is None else str(pin).strip())
+                                                     None if pin is None else str(pin).strip(), new=body.get("new") is True)
                 out = {"player_id": pid, "profile": pl, "created": created, "history": st.history(pid) if pid else []}
                 if new_pin:
                     out["new_pin"] = new_pin                   # shown once by the page; only its hash is kept
@@ -1924,6 +1983,10 @@ def main():
     ap.add_argument("--claude-timeout", type=float, default=120.0, help="seconds to wait for one Claude reply")
     ap.add_argument("--voice-dir", default=None, help="directory of a running play/tts_worker.py (neural voice); none = "
                     "the page uses the browser's own speech")
+    ap.add_argument("--pins", action="store_true",
+                    help="name + 4-digit PIN login (2026-11-09 to 2026-11-17); default: the name alone is the login")
+    ap.add_argument("--anti-stall", type=float, default=ANTI_STALL_S,
+                    help="seconds the model may sit on full elixir before it must play (0 = off)")
     ap.add_argument("--threads", type=int, default=2, help="torch CPU threads (torch's default is far slower here)")
     args = ap.parse_args()
     if args.llm_replays is None:

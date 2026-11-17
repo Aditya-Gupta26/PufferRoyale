@@ -304,7 +304,7 @@ def test_neural_voice_wiring(tmp_path, policy_player):
 
 # ---------------------------------------------------------------------------------------------- records
 def test_name_and_pin_are_the_login(tmp_path):
-    st = ph.Store(str(tmp_path))
+    st = ph.Store(str(tmp_path), pins=True)
     assert st.hello(None) == (None, {}, False, None) and st.players == {}      # nobody is made without a name
     with pytest.raises(ValueError, match="choose a PIN"):
         st.hello(None, "Aditya")                                               # a new name needs a PIN
@@ -323,7 +323,7 @@ def test_name_and_pin_are_the_login(tmp_path):
         st.hello(None, "Aditya")
     bob, _, c, _ = st.hello(pid, "Bob", "0000")                                # a different name is a different player
     assert c and bob != pid and len(st.players) == 2
-    assert ph.Store(str(tmp_path)).hello(None, "bob", "0000")[0] == bob        # also after a restart
+    assert ph.Store(str(tmp_path), pins=True).hello(None, "bob", "0000")[0] == bob        # also after a restart
     st.set_pin(pid, "9876")                                                    # "Change my PIN"
     with pytest.raises(ValueError, match="wrong PIN"):
         st.hello(None, "Aditya", "1234")
@@ -333,7 +333,7 @@ def test_name_and_pin_are_the_login(tmp_path):
 
 
 def test_wrong_pins_lock_the_name(tmp_path, monkeypatch):
-    st = ph.Store(str(tmp_path))
+    st = ph.Store(str(tmp_path), pins=True)
     pid = st.hello(None, "Ann", "1111")[0]
     for i in range(ph.PIN_TRIES - 1):
         with pytest.raises(ValueError, match="left"):
@@ -350,7 +350,7 @@ def test_wrong_pins_lock_the_name(tmp_path, monkeypatch):
 
 def test_players_from_before_pins_get_one_once(tmp_path):
     (tmp_path / "players.json").write_text(json.dumps({"aaaaaaaaaaaa": {"name": "Cleo"}, "bbbbbbbbbbbb": {"name": "Dev"}}))
-    st = ph.Store(str(tmp_path))
+    st = ph.Store(str(tmp_path), pins=True)
     pid, prof, created, pin = st.hello(None, "cleo", "")                       # by name: the site gives a PIN
     assert pid == "aaaaaaaaaaaa" and not created and ph.PIN_RE.match(pin) and "pin" not in prof
     assert st.hello(None, "Cleo", pin)[3] is None                              # shown once; from now on it is needed
@@ -358,18 +358,18 @@ def test_players_from_before_pins_get_one_once(tmp_path):
         st.hello(None, "Cleo")
     pid2, _, _, pin2 = st.hello("bbbbbbbbbbbb")                                # by the browser's stored id
     assert pid2 == "bbbbbbbbbbbb" and ph.PIN_RE.match(pin2)
-    assert ph.Store(str(tmp_path)).hello(None, "Dev", pin2)[0] == pid2       # persisted (as a hash)
+    assert ph.Store(str(tmp_path), pins=True).hello(None, "Dev", pin2)[0] == pid2       # persisted (as a hash)
 
 
 def test_admin_file_drops_a_player_and_resets_a_pin(tmp_path):
-    st = ph.Store(str(tmp_path))
+    st = ph.Store(str(tmp_path), pins=True)
     a = st.hello(None, "Old Name", "1111")[0]
     b = st.hello(None, "Bob", "2222")[0]
     for i, pid in enumerate((a, b)):
         st.save_match({"summary": {"id": f"20261106_12000{i}_abcdef", "player_id": pid, "name": "x", "result": 1,
                                    "crowns": [1, 0], "ranked": True, "decks": {}, "abandoned": False}})
     (tmp_path / "admin.json").write_text(json.dumps({"drop": ["old name"], "reset_pin": ["BOB"]}))
-    st2 = ph.Store(str(tmp_path))                                              # the restarted server
+    st2 = ph.Store(str(tmp_path), pins=True)                                              # the restarted server
     assert set(st2.players) == {b} and [r["name"] for r in st2.leaderboard()["rows"]] == ["Bob"]
     assert os.listdir(tmp_path / "removed") == ["20261106_120000_abcdef.json"]  # kept aside, not deleted
     assert sorted(os.listdir(tmp_path / "matches")) == ["20261106_120001_abcdef.json"]
@@ -378,20 +378,51 @@ def test_admin_file_drops_a_player_and_resets_a_pin(tmp_path):
     assert any(e.get("admin_drop") == a for e in log) and any(e.get("admin_reset_pin") == b for e in log)
     pid, _, _, pin = st2.hello(None, "Bob")                                    # reset: a new PIN, shown once
     assert pid == b and ph.PIN_RE.match(pin)
-    assert ph.Store(str(tmp_path)).hello(None, "old name", "1111")[2]      # the name is free again (a new player)
+    assert ph.Store(str(tmp_path), pins=True).hello(None, "old name", "1111")[2]      # the name is free again (a new player)
 
 
 def test_two_servers_keep_each_others_pins(tmp_path):
     root = tmp_path / "data"
     root.mkdir()
     (root / "players.json").write_text(json.dumps({"aaaaaaaaaaaa": {"name": "Cleo"}}))
-    a, b = ph.Store(str(root)), ph.Store(str(root))           # the old and the new site job, both running
+    a, b = ph.Store(str(root), pins=True), ph.Store(str(root), pins=True)           # the old and the new site job, both running
     pin = a.hello(None, "Cleo")[3]                           # a gives Cleo a PIN
     b.update("aaaaaaaaaaaa", speed=0.5)                      # b saves its own copy, made before that PIN
     assert json.load(open(root / "players.json"))["aaaaaaaaaaaa"]["pin"]       # not wiped
     assert b.hello(None, "Cleo", pin)[3] is None             # b uses a's PIN: no second PIN, no free login
     with pytest.raises(ValueError, match="wrong PIN"):
         b.hello(None, "Cleo", f"{(int(pin) + 1) % 10000:04d}")
+
+
+def test_the_name_alone_is_the_login_by_default(tmp_path):
+    """Since 2026-11-17 (the owner's request: no PINs) the same name, in any case or spacing and with or without
+    _ - . ', is the same player on any device. No PIN is asked for, checked or made, and the PIN records players
+    already have stay in players.json untouched (the PIN tests above run with pins=True, the --pins login)."""
+    rec = {"salt": "00", "hash": "ab" * 32, "set": "2026-11-10T00:00:00"}
+    (tmp_path / "players.json").write_text(json.dumps({"aaaaaaaaaaaa": {"name": "Cleo", "pin": rec}}))
+    st = ph.Store(str(tmp_path))
+    pid, prof, created, new_pin = st.hello(None, "Ann")                       # a new name: a new player, no PIN
+    assert created and new_pin is None and "pin" not in st.players[pid]
+    for other in ("ann", "  ANN ", "A-nn", "a n.n"):
+        again, _, created2, np2 = st.hello(None, other, "9999")               # a typed PIN is ignored
+        assert again == pid and not created2 and np2 is None
+    assert st.hello(None, "Ann", new=True)[0] == pid                          # "New player" too: the name decides
+    assert st.hello(None, "cleo")[:4:3] == ("aaaaaaaaaaaa", None)             # an old player with a PIN: the name is enough
+    assert json.load(open(tmp_path / "players.json"))["aaaaaaaaaaaa"]["pin"] == rec   # kept, untouched
+    with pytest.raises(ValueError, match="no PINs"):
+        st.set_pin(pid, "1234")
+
+
+def test_two_servers_share_new_players(tmp_path):
+    """The old and the new site job overlap (2026-11-17): a player one makes is the same player on the other, by the
+    browser's stored id (the remembered sign-in) and by name, never a second player with the same name."""
+    a, b = ph.Store(str(tmp_path)), ph.Store(str(tmp_path))
+    pid = a.hello(None, "Zoe")[0]
+    assert b.hello(pid)[0] == pid
+    assert b.hello(None, "zoe")[:3:2] == (pid, False)
+    c = ph.Store(str(tmp_path))
+    pid2 = a.hello(None, "Max")[0]
+    assert c.hello(None, "MAX")[0] == pid2 and len(c.players) == 2
 
 
 def test_old_duplicate_names_are_merged(tmp_path):
@@ -468,7 +499,7 @@ def test_spectators(tmp_path, policy_player):
 
 # ---------------------------------------------------------------------------------------------- HTTP
 def test_http_seats_line_and_auth(tmp_path, policy_player):
-    srv = make_server(tmp_path, policy_player, max_players=1)
+    srv = make_server(tmp_path, policy_player, max_players=1, pins=True)   # the --pins login
     token, owner = "t" * 22, "o" * 22
     httpd = ph.ThreadingHTTPServer(("127.0.0.1", 0), ph.make_handler(srv, token, owner, "<html>ok</html>"))
     httpd.daemon_threads = True

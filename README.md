@@ -35,8 +35,8 @@ the game by playing against itself for 10 billion steps, and a website where you
 
 Open **https://aditya-gupta26.github.io/pr-play/** on a computer or a phone, then:
 
-1. **Sign in** with a name and a 4-digit PIN of your choice. The same name and PIN bring back your record, deck
-   and settings on any device.
+1. **Sign in** with a name. The same name brings back your record, deck and settings on any device, and a device
+   you have signed in on remembers you next time. There is no password, so anyone who types your name plays as you.
 2. **Pick a deck.** Choose one of the 7 presets or build your own from the 64 cards. You can choose the agent's
    deck too, or leave it on "random preset".
 3. **Play.** Press **Play** and drag a card onto your half of the arena (or tap a card, then a tile). Your card
@@ -51,7 +51,8 @@ in the last minute of overtime.
 
 **Who you are up against.** The agent makes a decision every 0.5 s, using only what a player could see: it never
 sees your hand or your elixir, and you never see its. So far humans have won **4 of 22 ranked matches** against
-it ([details](#humans)).
+it ([details](#humans)). On the site, the agent has to play a card once it has sat on full elixir for 5 seconds
+(see [Limitations](#limitations)).
 
 The page has a few extras. *Hint* marks the card and tile the agent itself would play in your place, and
 *Autopilot* lets it play for you (any card you play still goes first). A match with either one switched on is not
@@ -466,6 +467,12 @@ GPU-hours are in [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
 - **The language-model games** used one prompt, effort `low` and two decks for Claude. With 25 games per model the
   intervals are wide, and those of Opus 5.5 and Sonnet 5.5 overlap.
 - **The scripted heuristic bot** was used while tuning hyperparameters, so it is not a fully unseen benchmark.
+- **The agent can go passive.** It never trained against an opponent that stops playing, and against one it often
+  sits on full elixir. In 14 test games against an opponent that never plays, it won 11, drew 3 at 0 to 0 and
+  wasted about 50 elixir per game. Since 17 November 2026 the play site removes the agent's wait option after
+  5 seconds on full elixir, so it plays the card it already preferred. With that rule it won all 14 games by
+  destroying the King tower and wasted about 1.5 elixir per game, and in 14 games against the agent without the
+  rule it won 6, drew 5 and lost 3. The rule is a patch on the site; the model itself is unchanged.
 
 ---
 
